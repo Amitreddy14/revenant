@@ -1,0 +1,8 @@
+# Single place for dependency and plugin versions.
+# Spring Boot's BOM manages almost everything else (JUnit, AssertJ, Jackson, Kafka client, ...).
+
+[versions]
+spring-boot = "4.1.2"
+
+[plugins]
+spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
