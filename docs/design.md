@@ -87,19 +87,37 @@ flowchart LR
 | Module | Purpose | Depends on |
 |---|---|---|
 | `revenant-core` | History, replay, retry policy. Pure Java, no frameworks. | nothing |
-| `revenant-persistence` | Flyway migrations, PostgreSQL repositories. | core |
+| `revenant-persistence` | SQL migrations, plain-JDBC repositories, transactions. No Spring (ADR-0008). | core |
 | `revenant-worker-sdk` | What workflow authors import. | core |
 | `revenant-server` | Spring Boot app: API, dispatcher, timers, outbox relay. | core, persistence |
 
-## 6. Data model (sketch, finalised in Phase 1)
+## 6. Data model (implemented in Phase 1)
+
+The schema lives in `revenant-persistence/src/main/resources/db/migration/V1__init_schema.sql` and is applied by Flyway.
+
+```mermaid
+erDiagram
+    WORKFLOW_EXECUTION ||--o{ HISTORY_EVENT : "has history"
+    WORKFLOW_EXECUTION ||--o{ TASK : "has tasks"
+    WORKFLOW_EXECUTION ||--o{ TIMER : "has timers"
+    WORKFLOW_EXECUTION ||--o{ OUTBOX : "emits events"
+```
 
 | Table | Key columns | Notes |
 |---|---|---|
-| `workflow_execution` | `workflow_id`, `type`, `status`, `version` | `version` enables optimistic locking. |
-| `history_event` | `(workflow_id, seq)` primary key, `type`, `payload`, `created_at` | Append-only. The primary key makes duplicate appends fail. |
-| `task` | `task_id`, `kind`, `workflow_id`, `visible_at`, `locked_until`, `attempt` | Claimed with `FOR UPDATE SKIP LOCKED`. |
-| `timer` | `timer_id`, `workflow_id`, `fire_at` | Indexed on `fire_at`. |
-| `outbox` | `event_id`, `workflow_id`, `payload`, `published_at` | Written in the same transaction as the history append. |
+| `workflow_execution` | `workflow_id`, `workflow_type`, `status`, `last_seq`, `closed_at` | `last_seq` doubles as the optimistic-lock version. A check constraint ties `closed_at` to `status`. |
+| `history_event` | `(workflow_id, seq)` primary key, `event_type`, `payload` (JSONB) | Append-only: a trigger rejects `UPDATE` and `DELETE`. The primary key makes duplicate appends fail. |
+| `task` | `task_id`, `workflow_id`, `kind`, `payload`, `attempt`, `visible_at`, `locked_by`, `locked_until` | Claimed with `FOR UPDATE SKIP LOCKED` under a lease. `attempt` is a fencing token. |
+| `timer` | `timer_id`, `workflow_id`, `timer_seq`, `fire_at`, `fired_at` | Partial index on due timers. Timer service arrives in Phase 3. |
+| `outbox` | `event_id`, `workflow_id`, `event_type`, `payload`, `published_at` | Written in the same transaction as the history append. Relay arrives in Phase 4. |
+
+### Three mechanisms worth knowing
+
+**Optimistic append.** To append, a writer states the newest sequence number it has seen. The store runs `UPDATE workflow_execution SET last_seq = new WHERE workflow_id = ? AND last_seq = expected AND status = 'RUNNING'`. If another writer got there first, zero rows match and the append fails with `AppendConflictException`, so the caller re-reads and decides again. The primary key on `(workflow_id, seq)` is the second line of defence.
+
+**Leases and fencing.** A worker claims a task by setting `locked_until` in the future and incrementing `attempt`. If the worker dies, the lease runs out and the task becomes claimable again. When a worker reports completion it must present the `attempt` it was given. A worker that lost its lease still holds the old number, so its late report is rejected instead of corrupting the new owner's work.
+
+**One transaction per step.** `WorkflowStore.start` creates the workflow, appends `WorkflowStarted`, writes the outbox row and enqueues the first task in a single transaction. A crash at any point leaves either all four or none.
 
 Workflow status moves one way:
 
