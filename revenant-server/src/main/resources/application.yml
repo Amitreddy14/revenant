@@ -1,6 +1,11 @@
 spring:
   application:
     name: revenant-server
+  datasource:
+    # Defaults match docker-compose.yml. Override with environment variables in other environments.
+    url: ${REVENANT_DB_URL:jdbc:postgresql://localhost:5432/revenant}
+    username: ${REVENANT_DB_USER:revenant}
+    password: ${REVENANT_DB_PASSWORD:revenant}
 
 server:
   port: 8080
