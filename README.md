@@ -7,7 +7,7 @@
 ![Spring Boot 4.1](https://img.shields.io/badge/Spring%20Boot-4.1-brightgreen)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow)
 
-**Status: Phase 0 (scaffold).** The build, infrastructure and design are in place; the engine itself is built phase by phase (see the [roadmap](#roadmap)).
+**Status: Phase 2 (replay core).** The replay engine works and is tested by crashing it at every point; retries, timers and the worker SDK come next (see the [roadmap](#roadmap)).
 
 ## Why it exists
 
@@ -30,17 +30,17 @@ PostgreSQL holds all state that matters. Redis only makes things faster and Kafk
 
 ## Quick start (Windows PowerShell)
 
-Requirements: JDK 21, Docker Desktop, Git.
+Requirements: JDK 21, Docker Desktop (it must be running, the tests start their own PostgreSQL), Git.
 
 ```powershell
 # 1. Start PostgreSQL, Redis and Kafka
 docker compose up -d
 docker compose ps            # wait until all three show "healthy"
 
-# 2. Build and run the tests
+# 2. Build and run the tests (starts a throwaway PostgreSQL container)
 .\gradlew.bat build
 
-# 3. Start the server
+# 3. Start the server (applies the database migrations on startup)
 .\gradlew.bat :revenant-server:bootRun
 
 # 4. In a second terminal, check it is alive
@@ -55,8 +55,8 @@ Stop everything with `docker compose down` (add `-v` to also delete the data).
 
 ```
 revenant/
-├── revenant-core/          pure engine logic: history, replay, retry policy (no frameworks)
-├── revenant-persistence/   PostgreSQL migrations and repositories
+├── revenant-core/          pure engine logic: history, replay (Decider), no dependencies
+├── revenant-persistence/   SQL migrations, JDBC repositories, transactions (no Spring)
 ├── revenant-worker-sdk/    the library workflow authors depend on
 ├── revenant-server/        Spring Boot application
 ├── docs/
@@ -71,9 +71,9 @@ revenant/
 | Phase | Deliverable | Status |
 |---|---|---|
 | 0 | Design doc, ADRs, Gradle scaffold, Docker Compose, CI | Done |
-| 1 | PostgreSQL schema, Flyway migrations, Testcontainers | Next |
-| 2 | Event-sourced history and the replay core | Planned |
-| 3 | Retries, timers, timeouts, failure handling | Planned |
+| 1 | PostgreSQL schema, Flyway migrations, Testcontainers | Done |
+| 2 | Event-sourced history and the replay core | Done |
+| 3 | Retries, timers, timeouts, failure handling | Next |
 | 4 | Redis task wake-ups and Kafka event stream | Planned |
 | 5 | Worker SDK and a demo workflow that survives `kill -9` | Planned |
 | 6 | Free deployment, documentation, demo | Planned |
