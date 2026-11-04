@@ -27,6 +27,8 @@ dependencies {
     // managed by Spring Boot.
     implementation("io.lettuce:lettuce-core")
 
+    // The end-to-end tests run a real worker from the SDK against this server.
+    testImplementation(project(":revenant-worker-sdk"))
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")

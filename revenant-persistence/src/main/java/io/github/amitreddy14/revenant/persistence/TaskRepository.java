@@ -68,6 +68,12 @@ public final class TaskRepository {
                     + "locked_by = NULL, locked_until = NULL "
                     + "WHERE task_id = ?";
 
+    // Reads a leased task by id and attempt, fenced like COMPLETE_TASK. The HTTP API uses it so a
+    // worker only has to send the id and attempt it was given, never the task's contents.
+    static final String FIND_LEASED =
+            "SELECT task_id, workflow_id, kind, command_id, name, payload::text, attempt FROM task "
+                    + "WHERE task_id = ? AND attempt = ? AND locked_by IS NOT NULL";
+
     // The oldest leased activity whose start-to-close deadline has passed.
     static final String LOCK_TIMED_OUT =
             "SELECT task_id, workflow_id, command_id, name, payload::text, attempt FROM task "
@@ -163,21 +169,38 @@ public final class TaskRepository {
             statement.setString(2, workerId);
             statement.setLong(3, lease.toMillis());
             try (ResultSet row = statement.executeQuery()) {
-                if (!row.next()) {
-                    return Optional.empty();
-                }
-                long command = row.getLong(4);
-                Long commandId = row.wasNull() ? null : command;
-                return Optional.of(new ClaimedTask(
-                        row.getLong(1),
-                        new WorkflowId(row.getObject(2, UUID.class)),
-                        TaskKind.valueOf(row.getString(3)),
-                        commandId,
-                        row.getString(5),
-                        row.getString(6),
-                        row.getInt(7)));
+                return row.next() ? Optional.of(toClaimedTask(row)) : Optional.empty();
             }
         }
+    }
+
+    /**
+     * Looks up a task that is currently leased, by id and attempt.
+     *
+     * @return empty if the task is gone, was re-claimed since ({@code attempt} no longer matches),
+     *         or is not leased
+     */
+    public Optional<ClaimedTask> findLeased(Connection connection, long taskId, int attempt) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(FIND_LEASED)) {
+            statement.setLong(1, taskId);
+            statement.setInt(2, attempt);
+            try (ResultSet row = statement.executeQuery()) {
+                return row.next() ? Optional.of(toClaimedTask(row)) : Optional.empty();
+            }
+        }
+    }
+
+    private static ClaimedTask toClaimedTask(ResultSet row) throws SQLException {
+        long command = row.getLong(4);
+        Long commandId = row.wasNull() ? null : command;
+        return new ClaimedTask(
+                row.getLong(1),
+                new WorkflowId(row.getObject(2, UUID.class)),
+                TaskKind.valueOf(row.getString(3)),
+                commandId,
+                row.getString(5),
+                row.getString(6),
+                row.getInt(7));
     }
 
     /**
