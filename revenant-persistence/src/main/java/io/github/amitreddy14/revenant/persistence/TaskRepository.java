@@ -7,6 +7,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.time.Duration;
 import java.util.Optional;
 import java.util.UUID;
@@ -18,8 +19,8 @@ import java.util.UUID;
 public final class TaskRepository {
 
     static final String INSERT_TASK =
-            "INSERT INTO task (workflow_id, kind, payload, visible_at) "
-                    + "VALUES (?, ?, ?::jsonb, now() + (?::bigint * interval '1 millisecond')) "
+            "INSERT INTO task (workflow_id, kind, command_id, name, payload, visible_at) "
+                    + "VALUES (?, ?, ?, ?, ?::jsonb, now() + (?::bigint * interval '1 millisecond')) "
                     + "RETURNING task_id";
 
     // Pick the oldest claimable task (never claimed, or its lease expired) and lease it, atomically.
@@ -35,24 +36,49 @@ public final class TaskRepository {
                     + "SET locked_by = ?, locked_until = now() + (?::bigint * interval '1 millisecond'), "
                     + "attempt = t.attempt + 1 "
                     + "FROM next WHERE t.task_id = next.task_id "
-                    + "RETURNING t.task_id, t.workflow_id, t.kind, t.payload::text, t.attempt";
+                    + "RETURNING t.task_id, t.workflow_id, t.kind, t.command_id, t.name, t.payload::text, t.attempt";
 
     // The attempt number is a fencing token: a worker whose lease expired cannot complete the task.
     static final String COMPLETE_TASK = "DELETE FROM task WHERE task_id = ? AND attempt = ?";
 
     /**
-     * Adds a task to the queue.
+     * Adds a workflow task to the queue ("your workflow has new events, decide what to do next").
      *
      * @param delay how long to wait before the task becomes claimable ({@link Duration#ZERO} for now)
      * @return the new task id
+     * @throws IllegalArgumentException if {@code kind} is {@link TaskKind#ACTIVITY_TASK}; use
+     *                                  {@link #enqueueActivity} for those
      */
     public long enqueue(Connection connection, WorkflowId workflowId, TaskKind kind, String payloadJson,
             Duration delay) throws SQLException {
+        if (kind == TaskKind.ACTIVITY_TASK) {
+            throw new IllegalArgumentException("activity tasks need a command id and name: use enqueueActivity");
+        }
+        return insert(connection, workflowId, kind, null, null, payloadJson, delay);
+    }
+
+    /**
+     * Adds an activity task to the queue.
+     *
+     * @param commandId the workflow command this task answers
+     * @param name      the activity to run
+     * @param inputJson the activity input
+     * @return the new task id
+     */
+    public long enqueueActivity(Connection connection, WorkflowId workflowId, long commandId, String name,
+            String inputJson) throws SQLException {
+        return insert(connection, workflowId, TaskKind.ACTIVITY_TASK, commandId, name, inputJson, Duration.ZERO);
+    }
+
+    private long insert(Connection connection, WorkflowId workflowId, TaskKind kind, Long commandId, String name,
+            String payloadJson, Duration delay) throws SQLException {
         try (PreparedStatement statement = connection.prepareStatement(INSERT_TASK)) {
             statement.setObject(1, workflowId.value());
             statement.setString(2, kind.name());
-            statement.setString(3, payloadJson);
-            statement.setLong(4, delay.toMillis());
+            statement.setObject(3, commandId, Types.BIGINT);
+            statement.setString(4, name);
+            statement.setString(5, payloadJson);
+            statement.setLong(6, delay.toMillis());
             try (ResultSet row = statement.executeQuery()) {
                 row.next();
                 return row.getLong(1);
@@ -77,12 +103,16 @@ public final class TaskRepository {
                 if (!row.next()) {
                     return Optional.empty();
                 }
+                long command = row.getLong(4);
+                Long commandId = row.wasNull() ? null : command;
                 return Optional.of(new ClaimedTask(
                         row.getLong(1),
                         new WorkflowId(row.getObject(2, UUID.class)),
                         TaskKind.valueOf(row.getString(3)),
-                        row.getString(4),
-                        row.getInt(5)));
+                        commandId,
+                        row.getString(5),
+                        row.getString(6),
+                        row.getInt(7)));
             }
         }
     }

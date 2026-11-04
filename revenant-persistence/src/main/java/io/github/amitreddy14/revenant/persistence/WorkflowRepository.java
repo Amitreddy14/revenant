@@ -9,6 +9,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Types;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +20,9 @@ import java.util.Optional;
  * {@link Connection}, so it can join a larger transaction (see {@link Transactions}).
  */
 public final class WorkflowRepository {
+
+    /** The workflow's state as read under a row lock. */
+    public record Locked(long lastSeq, WorkflowStatus status) {}
 
     private static final String UNIQUE_VIOLATION = "23505";
 
@@ -31,14 +35,23 @@ public final class WorkflowRepository {
                     + "WHERE workflow_id = ? AND last_seq = ? AND status = 'RUNNING'";
 
     static final String INSERT_EVENT =
-            "INSERT INTO history_event (workflow_id, seq, event_type, payload) VALUES (?, ?, ?, ?::jsonb)";
+            "INSERT INTO history_event (workflow_id, seq, event_type, command_id, name, payload) "
+                    + "VALUES (?, ?, ?, ?, ?, ?::jsonb)";
 
     static final String SELECT_HISTORY =
-            "SELECT seq, event_type, payload::text, created_at "
+            "SELECT seq, event_type, command_id, name, payload::text, created_at "
                     + "FROM history_event WHERE workflow_id = ? ORDER BY seq";
 
     static final String SELECT_WORKFLOW =
             "SELECT workflow_type, status, last_seq, created_at FROM workflow_execution WHERE workflow_id = ?";
+
+    // Takes the row lock that serialises everything that changes one workflow.
+    static final String LOCK_WORKFLOW =
+            "SELECT last_seq, status FROM workflow_execution WHERE workflow_id = ? FOR UPDATE";
+
+    static final String CLOSE_WORKFLOW =
+            "UPDATE workflow_execution SET status = ?, closed_at = now(), updated_at = now() "
+                    + "WHERE workflow_id = ? AND status = 'RUNNING'";
 
     /**
      * Creates a workflow with an empty history.
@@ -89,7 +102,9 @@ public final class WorkflowRepository {
                 statement.setObject(1, id.value());
                 statement.setLong(2, seq);
                 statement.setString(3, event.type());
-                statement.setString(4, event.payloadJson());
+                statement.setObject(4, event.commandId(), Types.BIGINT);
+                statement.setString(5, event.name());
+                statement.setString(6, event.payloadJson());
                 statement.addBatch();
             }
             statement.executeBatch();
@@ -104,11 +119,15 @@ public final class WorkflowRepository {
             try (ResultSet rows = statement.executeQuery()) {
                 List<HistoryEvent> history = new ArrayList<>();
                 while (rows.next()) {
+                    long commandId = rows.getLong(3);
+                    Long command = rows.wasNull() ? null : commandId;
                     history.add(new HistoryEvent(
                             rows.getLong(1),
                             rows.getString(2),
-                            rows.getString(3),
-                            rows.getObject(4, OffsetDateTime.class).toInstant()));
+                            command,
+                            rows.getString(4),
+                            rows.getString(5),
+                            rows.getObject(6, OffsetDateTime.class).toInstant()));
                 }
                 return history;
             }
@@ -128,6 +147,41 @@ public final class WorkflowRepository {
                         WorkflowStatus.valueOf(row.getString(2)),
                         row.getLong(3),
                         row.getObject(4, OffsetDateTime.class).toInstant()));
+            }
+        }
+    }
+
+    /**
+     * Locks the workflow row until the transaction ends and returns its state. Anyone else who
+     * tries to change this workflow waits. Use it before a read-then-write that must not interleave.
+     */
+    public Optional<Locked> lock(Connection connection, WorkflowId id) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(LOCK_WORKFLOW)) {
+            statement.setObject(1, id.value());
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) {
+                    return Optional.empty();
+                }
+                return Optional.of(new Locked(row.getLong(1), WorkflowStatus.valueOf(row.getString(2))));
+            }
+        }
+    }
+
+    /**
+     * Moves a running workflow to a closed status.
+     *
+     * @throws IllegalArgumentException if {@code status} is {@link WorkflowStatus#RUNNING}
+     * @throws IllegalStateException    if the workflow is not running
+     */
+    public void close(Connection connection, WorkflowId id, WorkflowStatus status) throws SQLException {
+        if (!status.isClosed()) {
+            throw new IllegalArgumentException("close() needs a closed status, got " + status);
+        }
+        try (PreparedStatement statement = connection.prepareStatement(CLOSE_WORKFLOW)) {
+            statement.setString(1, status.name());
+            statement.setObject(2, id.value());
+            if (statement.executeUpdate() != 1) {
+                throw new IllegalStateException("Workflow " + id + " is not running, cannot close it as " + status);
             }
         }
     }

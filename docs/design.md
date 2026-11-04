@@ -93,7 +93,7 @@ flowchart LR
 
 ## 6. Data model (implemented in Phase 1)
 
-The schema lives in `revenant-persistence/src/main/resources/db/migration/V1__init_schema.sql` and is applied by Flyway.
+The schema lives in `revenant-persistence/src/main/resources/db/migration/` (`V1__init_schema.sql`, `V2__command_correlation.sql`) and is applied by Flyway.
 
 ```mermaid
 erDiagram
@@ -106,8 +106,8 @@ erDiagram
 | Table | Key columns | Notes |
 |---|---|---|
 | `workflow_execution` | `workflow_id`, `workflow_type`, `status`, `last_seq`, `closed_at` | `last_seq` doubles as the optimistic-lock version. A check constraint ties `closed_at` to `status`. |
-| `history_event` | `(workflow_id, seq)` primary key, `event_type`, `payload` (JSONB) | Append-only: a trigger rejects `UPDATE` and `DELETE`. The primary key makes duplicate appends fail. |
-| `task` | `task_id`, `workflow_id`, `kind`, `payload`, `attempt`, `visible_at`, `locked_by`, `locked_until` | Claimed with `FOR UPDATE SKIP LOCKED` under a lease. `attempt` is a fencing token. |
+| `history_event` | `(workflow_id, seq)` primary key, `event_type`, `command_id`, `name`, `payload` (JSONB) | Append-only: a trigger rejects `UPDATE` and `DELETE`. The primary key makes duplicate appends fail. A unique index on `(workflow_id, command_id, event_type)` stops a command being scheduled or completed twice. |
+| `task` | `task_id`, `workflow_id`, `kind`, `command_id`, `name`, `payload`, `attempt`, `visible_at`, `locked_by`, `locked_until` | Claimed with `FOR UPDATE SKIP LOCKED` under a lease. `attempt` is a fencing token. An activity task must carry `command_id` and `name`; a workflow task must not. |
 | `timer` | `timer_id`, `workflow_id`, `timer_seq`, `fire_at`, `fired_at` | Partial index on due timers. Timer service arrives in Phase 3. |
 | `outbox` | `event_id`, `workflow_id`, `event_type`, `payload`, `published_at` | Written in the same transaction as the history append. Relay arrives in Phase 4. |
 
@@ -148,13 +148,45 @@ What happens when each part dies, and why nothing is lost:
 
 **Delivery.** Activities run **at least once**: a crash after the side effect but before the result is recorded causes a retry. Workflow *state* changes happen **exactly once**, because history appends are transactional and idempotent. Activity authors should use an idempotency key, for example `workflowId + activityId`, when calling external systems.
 
-**Determinism.** Workflow code runs again on every replay, so it must make the same decisions every time. Inside a workflow, do not read the system clock, generate random numbers, start threads, or call external systems directly. The SDK provides approved replacements (workflow time, workflow random, durable sleep) *(Phase 5)*. During replay the SDK compares the commands the code produces with the recorded history; a mismatch raises a non-determinism error that fails the workflow *task* (and is fixable by deploying corrected code), not the workflow.
+**Determinism.** Workflow code runs again on every replay, so it must make the same decisions every time. Inside a workflow, do not read the system clock, generate random numbers, start threads, or call external systems directly. The SDK provides approved replacements (workflow time, workflow random, durable sleep) *(Phase 5)*. During replay the engine compares the activity calls the code makes with the recorded history, by order and by activity name. A mismatch, or code that stops before reaching a recorded call, raises `NonDeterminismException`, which fails the decision *task* (fixable by deploying corrected code), not the workflow. Inputs are deliberately not compared, because PostgreSQL's JSONB rewrites whitespace and key order (ADR-0009).
 
 **Concurrency control.** A history append writes `seq = last_seq + 1`. If two writers race, one violates the primary key and retries after re-reading.
 
 **Retries.** Each activity has a retry policy: initial interval, backoff coefficient, maximum interval, maximum attempts, and a list of non-retryable error types. Timeouts: schedule-to-close, start-to-close and heartbeat. Attempt counters live on the task row, not in the history, so a flapping activity does not bloat the history.
 
 **Ordering.** Kafka events use `workflow_id` as the message key, so consumers see one workflow's events in order. Delivery is at least once; consumers deduplicate by `event_id`.
+
+### How a decision is made (implemented in Phase 2)
+
+`Decider.decide(definition, history)` is a pure function: no database, clock or threads. A worker loads the history, calls it, and hands the result to `WorkflowStore.completeWorkflowTask`.
+
+```mermaid
+flowchart TD
+    A[Load history] --> B[Validate history]
+    B --> C{Already closed?}
+    C -->|yes| Z[Nothing to do]
+    C -->|no| D[Run workflow code from the top]
+    D --> E{What does the code do next?}
+    E -->|calls an activity with a result in history| F[Return the recorded result]
+    F --> E
+    E -->|calls an activity still running| G[Pause, nothing new to record]
+    E -->|calls an activity not in history| H[Record a new command, pause]
+    E -->|returns| I[Record WorkflowCompleted]
+    E -->|throws| J[Record WorkflowFailed]
+    G --> K[Commit in one transaction]
+    H --> K
+    I --> K
+    J --> K
+```
+
+Two storage operations commit every step, each in a single transaction:
+
+| Operation | Removes | Appends | Queues |
+|---|---|---|---|
+| `completeWorkflowTask` | the workflow task | the decision's events (and an outbox row for each) | one activity task per new command; closes the workflow if the decision ends it |
+| `completeActivityTask` | the activity task | `ActivityCompleted` or `ActivityFailed` (and an outbox row) | a workflow task, so the code can continue |
+
+Both return one of three outcomes. `APPLIED`: recorded. `LEASE_LOST`: the worker's lease expired and the task belongs to someone else, so nothing was written. `STALE_DISCARDED`: the history moved on (or the workflow closed) while the worker was busy, so the result is dropped. That last case is safe because every event that needs a decision queues a workflow task in its own transaction, so a fresher task already exists.
 
 ## 9. Roadmap
 

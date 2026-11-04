@@ -74,11 +74,11 @@ class TaskQueueTest extends PostgresIntegrationTest {
         store.completeTask(first.taskId(), first.attempt());
 
         transactions.executeVoid(connection ->
-                tasks.enqueue(connection, id, TaskKind.ACTIVITY_TASK, "{}", Duration.ofMinutes(5)));
-        assertThat(store.claimTask(TaskKind.ACTIVITY_TASK, "worker-1", LEASE)).isEmpty();
+                tasks.enqueue(connection, id, TaskKind.WORKFLOW_TASK, "{}", Duration.ofMinutes(5)));
+        assertThat(store.claimTask(TaskKind.WORKFLOW_TASK, "worker-1", LEASE)).isEmpty();
 
         execute("UPDATE task SET visible_at = now() - interval '1 second'");
-        assertThat(store.claimTask(TaskKind.ACTIVITY_TASK, "worker-1", LEASE)).isPresent();
+        assertThat(store.claimTask(TaskKind.WORKFLOW_TASK, "worker-1", LEASE)).isPresent();
     }
 
     @Test
