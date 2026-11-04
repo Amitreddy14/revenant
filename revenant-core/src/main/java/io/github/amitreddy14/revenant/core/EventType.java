@@ -7,6 +7,8 @@ public final class EventType {
     public static final String ACTIVITY_SCHEDULED = "ActivityScheduled";
     public static final String ACTIVITY_COMPLETED = "ActivityCompleted";
     public static final String ACTIVITY_FAILED = "ActivityFailed";
+    public static final String TIMER_STARTED = "TimerStarted";
+    public static final String TIMER_FIRED = "TimerFired";
     public static final String WORKFLOW_COMPLETED = "WorkflowCompleted";
     public static final String WORKFLOW_FAILED = "WorkflowFailed";
 

@@ -21,6 +21,14 @@ public final class Events {
         return new NewEvent(EventType.ACTIVITY_FAILED, commandId, name, errorJson);
     }
 
+    public static NewEvent timerStarted(long commandId, long durationMillis) {
+        return new NewEvent(EventType.TIMER_STARTED, commandId, null, "{\"durationMillis\":" + durationMillis + "}");
+    }
+
+    public static NewEvent timerFired(long commandId) {
+        return new NewEvent(EventType.TIMER_FIRED, commandId, null, "{}");
+    }
+
     public static NewEvent workflowCompleted(String resultJson) {
         return new NewEvent(EventType.WORKFLOW_COMPLETED, resultJson);
     }

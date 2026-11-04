@@ -13,3 +13,4 @@ Each ADR captures one significant decision: the context, what was decided, and t
 | [0007](0007-gradle-multi-module-framework-free-core.md) | Gradle multi-module layout with a framework-free core | Accepted |
 | [0008](0008-plain-jdbc-spring-free-persistence.md) | Plain JDBC with hand-written SQL in a Spring-free persistence module | Accepted |
 | [0009](0009-replay-by-rerunning-workflow-code.md) | Replay by re-running workflow code from the top | Accepted |
+| [0010](0010-retries-timers-and-timeouts.md) | Retries on the task row, durable timers as commands, start-to-close timeouts via a sweep | Accepted |

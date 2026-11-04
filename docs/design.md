@@ -107,8 +107,8 @@ erDiagram
 |---|---|---|
 | `workflow_execution` | `workflow_id`, `workflow_type`, `status`, `last_seq`, `closed_at` | `last_seq` doubles as the optimistic-lock version. A check constraint ties `closed_at` to `status`. |
 | `history_event` | `(workflow_id, seq)` primary key, `event_type`, `command_id`, `name`, `payload` (JSONB) | Append-only: a trigger rejects `UPDATE` and `DELETE`. The primary key makes duplicate appends fail. A unique index on `(workflow_id, command_id, event_type)` stops a command being scheduled or completed twice. |
-| `task` | `task_id`, `workflow_id`, `kind`, `command_id`, `name`, `payload`, `attempt`, `visible_at`, `locked_by`, `locked_until` | Claimed with `FOR UPDATE SKIP LOCKED` under a lease. `attempt` is a fencing token. An activity task must carry `command_id` and `name`; a workflow task must not. |
-| `timer` | `timer_id`, `workflow_id`, `timer_seq`, `fire_at`, `fired_at` | Partial index on due timers. Timer service arrives in Phase 3. |
+| `task` | `task_id`, `workflow_id`, `kind`, `command_id`, `name`, `payload`, `attempt`, `visible_at`, `locked_by`, `locked_until`, plus for activities `failures`, `max_attempts`, `initial_interval_ms`, `backoff_coefficient`, `max_interval_ms`, `start_to_close_ms`, `last_error` | Claimed with `FOR UPDATE SKIP LOCKED` under a lease. `attempt` is a fencing token. An activity task must carry `command_id` and `name`; a workflow task must not. The retry columns are copied from the workflow's call (V3). |
+| `timer` | `timer_id`, `workflow_id`, `timer_seq`, `command_id`, `fire_at`, `fired_at` | Partial index on due timers. Fire time uses the database clock. One timer per workflow command. |
 | `outbox` | `event_id`, `workflow_id`, `event_type`, `payload`, `published_at` | Written in the same transaction as the history append. Relay arrives in Phase 4. |
 
 ### Three mechanisms worth knowing
@@ -136,7 +136,9 @@ What happens when each part dies, and why nothing is lost:
 
 | Failure | Behaviour | Why it is safe |
 |---|---|---|
-| Worker dies during an activity | Lease expires without heartbeat, task becomes visible again, another worker retries it. | The task row lives in PostgreSQL. |
+| Worker dies during an activity | Lease expires without heartbeat, task becomes visible again, another worker retries it. With a start-to-close timeout the sweep fails the attempt instead, and the retry policy decides what happens next. | The task row lives in PostgreSQL. |
+| An activity hangs | At the start-to-close deadline the attempt is failed (`ActivityTimeout`) and retried or recorded as failed. Its late result is ignored. | The deadline and the fence are columns on the task row. |
+| Server is down when a timer is due | The timer fires on the first sweep after the server is back. | The timer is a row with a database-clock fire time, not memory. |
 | Worker dies during a workflow task | Lease expires, task is reassigned, the new worker replays the history. | History is authoritative; workers hold no state. |
 | Server instance dies | Other instances keep serving. The restarted one reads PostgreSQL. | Server is stateless. |
 | Redis is lost | Workers fall back to polling PostgreSQL. Slower, still correct. | Redis never holds state of record. |
@@ -152,7 +154,7 @@ What happens when each part dies, and why nothing is lost:
 
 **Concurrency control.** A history append writes `seq = last_seq + 1`. If two writers race, one violates the primary key and retries after re-reading.
 
-**Retries.** Each activity has a retry policy: initial interval, backoff coefficient, maximum interval, maximum attempts, and a list of non-retryable error types. Timeouts: schedule-to-close, start-to-close and heartbeat. Attempt counters live on the task row, not in the history, so a flapping activity does not bloat the history.
+**Retries and timeouts** (Phase 3, ADR-0010). A call may carry a retry policy (maximum attempts including the first, initial interval, backoff coefficient, maximum interval) and a start-to-close timeout. Failure counters live on the task row, not in the history, so a flapping activity does not bloat the history: only the final outcome is recorded. A worker may mark a failure non-retryable. Not yet implemented: schedule-to-close and heartbeat timeouts, and lists of non-retryable error types.
 
 **Ordering.** Kafka events use `workflow_id` as the message key, so consumers see one workflow's events in order. Delivery is at least once; consumers deduplicate by `event_id`.
 
@@ -188,6 +190,32 @@ Two storage operations commit every step, each in a single transaction:
 
 Both return one of three outcomes. `APPLIED`: recorded. `LEASE_LOST`: the worker's lease expired and the task belongs to someone else, so nothing was written. `STALE_DISCARDED`: the history moved on (or the workflow closed) while the worker was busy, so the result is dropped. That last case is safe because every event that needs a decision queues a workflow task in its own transaction, so a fresher task already exists.
 
+### Retries, timers and timeouts (implemented in Phase 3)
+
+The life of an activity task:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued: decision schedules the activity
+    Queued --> Leased: worker claims (attempt + 1)
+    Leased --> Done: success, recorded as ActivityCompleted
+    Leased --> Queued: worker crashed, lease expired (no timeout set), handed out again
+    Leased --> Backoff: failure or timeout, attempts left (failures + 1)
+    Backoff --> Queued: backoff elapsed
+    Leased --> Done: attempts used up or non-retryable, recorded as ActivityFailed
+    Done --> [*]
+```
+
+Operations, each a single transaction:
+
+| Operation | Effect |
+|---|---|
+| `completeActivityTask` | Success: as in Phase 2. Retryable failure with attempts left: count it, unlock the task, delay it by the backoff, history untouched (`RETRY_SCHEDULED`). Otherwise: record the final result and wake the workflow. |
+| `timeOutExpiredActivities(max)` | Finds leased activities past their start-to-close deadline and fails them like a reported failure (`ActivityTimeout`). The late worker is fenced out. |
+| `fireDueTimers(max)` | For each due timer: append `TimerFired`, queue a workflow task, mark it fired. A timer of a closed workflow is only marked. |
+
+`ctx.sleep(duration)` is a command like an activity call and shares its numbering. Replay answers a sleep whose `TimerFired` is recorded immediately, and pauses otherwise. Both sweeps are pulled: something must call them regularly, so a timer fires on the first sweep after it is due.
+
 ## 9. Roadmap
 
 | Phase | Deliverable | Proves |
@@ -204,4 +232,4 @@ Both return one of three outcomes. `APPLIED`: recorded. `LEASE_LOST`: the worker
 
 - **Free deployment target (Phase 6).** Candidate: an Oracle Cloud Always Free VM running Docker Compose. Fallback: local Docker plus a recorded demo. To be decided in Phase 6.
 - **Payload serialization.** JSON through Jackson 3 (bundled with Spring Boot 4) is the default. Revisit if payload size becomes an issue.
-- **History size limit.** Long-lived workflows need a "continue as new" mechanism. Out of scope until Phase 3 or later.
+- **History size limit.** Long-lived workflows need a "continue as new" mechanism. Out of scope until later.
