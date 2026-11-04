@@ -21,6 +21,11 @@ revenant:
   relay:
     interval: PT0.5S
     batch-size: 100
+  redis:
+    # Task wake-up hints between server instances. Only an accelerator: with Redis off or
+    # unreachable, workers poll PostgreSQL and nothing is lost (ADR-0004, ADR-0012).
+    enabled: true
+    url: ${REVENANT_REDIS_URL:redis://localhost:6379}
 
 server:
   port: 8080

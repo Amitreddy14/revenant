@@ -24,7 +24,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * wakes its workflow. The scheduler itself and Kafka are switched off here.
  */
 @Testcontainers
-@SpringBootTest(properties = {"revenant.kafka.enabled=false", "revenant.scheduler.enabled=false"})
+@SpringBootTest(properties = {"revenant.kafka.enabled=false", "revenant.scheduler.enabled=false",
+        "revenant.redis.enabled=false"})
 class SweepJobTest {
 
     @Container

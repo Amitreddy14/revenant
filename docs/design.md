@@ -141,7 +141,7 @@ What happens when each part dies, and why nothing is lost:
 | Server is down when a timer is due | The timer fires on the first sweep after the server is back. | The timer is a row with a database-clock fire time, not memory. |
 | Worker dies during a workflow task | Lease expires, task is reassigned, the new worker replays the history. | History is authoritative; workers hold no state. |
 | Server instance dies | Other instances keep serving. The restarted one reads PostgreSQL. | Server is stateless. |
-| Redis is lost | Workers fall back to polling PostgreSQL. Slower, still correct. | Redis never holds state of record. |
+| Redis is lost | Hints stop; pollers wake on their timeout and claim from PostgreSQL. Slower, still correct. The server keeps retrying the connection. | Redis never holds state of record. |
 | Kafka is down | Outbox rows accumulate; the relay fails fast, retries every tick, and catches up in order when Kafka returns. | The outbox is written in the same transaction as the history. |
 | Two servers run the relay | One gets the advisory lock; the other skips that tick. | `pg_try_advisory_xact_lock` is released on commit or crash. |
 | Relay crashes after Kafka accepted an event | The event is sent again. Consumers dedupe by `event_id`. | At-least-once delivery. |
@@ -236,6 +236,29 @@ flowchart LR
 | `SweepScheduler` / `RelayScheduler` | Spring `@Scheduled` loops. Exceptions are logged, never fatal. Switch off with `revenant.scheduler.enabled=false` and `revenant.kafka.enabled=false`. |
 
 See ADR-0011 for the reasoning.
+
+### Redis wake-up hints (implemented in Phase 4b)
+
+```mermaid
+sequenceDiagram
+    participant W as Writer (any server)
+    participant PG as PostgreSQL
+    participant R as Redis pub/sub
+    participant P as Poller (any server)
+    W->>PG: commit (task row is queued)
+    W-->>R: publish wake-up (fire and forget)
+    R-->>P: hint arrives, poller wakes early
+    P->>PG: claimTask (the real check)
+    Note over P,PG: No hint? The wait times out and the poller claims anyway.
+```
+
+| Piece | Behaviour |
+|---|---|
+| `TaskNotifier` (persistence) | Called by `WorkflowStore` after a commit that may have queued tasks. Failures are ignored. |
+| `RedisWakeUps` (server) | Publishes hints to `revenant:wake:<KIND>`, subscribes to the same channels, connects in the background and retries. |
+| `WakeUpSignals` (server) | `await(kind, maxWait)` returns on a hint or at the timeout. Many hints equal one look. |
+
+See ADR-0012. Redis holds no state, so losing it only makes workers a little slower to notice work.
 
 ## 9. Roadmap
 

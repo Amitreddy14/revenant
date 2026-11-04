@@ -23,6 +23,10 @@ dependencies {
     // by Spring Boot's dependency management.
     implementation("org.apache.kafka:kafka-clients")
 
+    // Redis: only task wake-up hints go through it (ADR-0012). Plain Lettuce client, version
+    // managed by Spring Boot.
+    implementation("io.lettuce:lettuce-core")
+
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
     testImplementation("org.testcontainers:testcontainers-junit-jupiter")
