@@ -15,10 +15,11 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
 /**
  * Boots the whole application against a real PostgreSQL. Spring Boot runs the Flyway migrations
  * on startup, so a passing test proves the schema applies and the store works end to end.
+ * Kafka and the background scheduler are switched off here; they have their own tests.
  * Docker must be running.
  */
 @Testcontainers
-@SpringBootTest
+@SpringBootTest(properties = {"revenant.kafka.enabled=false", "revenant.scheduler.enabled=false"})
 class RevenantServerApplicationTests {
 
     @Container

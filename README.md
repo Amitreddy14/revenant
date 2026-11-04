@@ -7,7 +7,7 @@
 ![Spring Boot 4.1](https://img.shields.io/badge/Spring%20Boot-4.1-brightgreen)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow)
 
-**Status: Phase 3 (retries, timers, timeouts).** Activities retry with exponential backoff, workflows can sleep for days with durable timers, and hung activities time out. All of it is tested by crashing the engine at every point; Redis, Kafka and the worker SDK come next (see the [roadmap](#roadmap)).
+**Status: Phase 4a (background scheduler and Kafka relay).** Activities retry with exponential backoff, workflows can sleep for days with durable timers, and hung activities time out. The server now fires timers by itself and publishes every workflow event to Kafka through a transactional outbox. Redis wake-ups and the worker SDK come next (see the [roadmap](#roadmap)).
 
 ## Why it exists
 
@@ -49,6 +49,14 @@ curl.exe http://localhost:8080/actuator/health
 
 Expected health response: `{"status":"UP"}` (the exact JSON may include more fields).
 
+Workflow events are published to the Kafka topic `revenant.workflow-events`. To watch them (any workflow started against the database shows up here):
+
+```powershell
+docker exec -it revenant-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic revenant.workflow-events --from-beginning --property print.key=true --property print.headers=true
+```
+
+Without Kafka, start the server with `--revenant.kafka.enabled=false`; the engine works the same.
+
 Stop everything with `docker compose down` (add `-v` to also delete the data).
 
 ## Repository layout
@@ -74,7 +82,8 @@ revenant/
 | 1 | PostgreSQL schema, Flyway migrations, Testcontainers | Done |
 | 2 | Event-sourced history and the replay core | Done |
 | 3 | Retries, timers, timeouts, failure handling | Done |
-| 4 | Redis task wake-ups and Kafka event stream | Next |
+| 4a | Background scheduler and Kafka outbox relay | Done |
+| 4b | Redis task wake-ups (accelerator only) | Next |
 | 5 | Worker SDK and a demo workflow that survives `kill -9` | Planned |
 | 6 | Free deployment, documentation, demo | Planned |
 

@@ -109,7 +109,7 @@ erDiagram
 | `history_event` | `(workflow_id, seq)` primary key, `event_type`, `command_id`, `name`, `payload` (JSONB) | Append-only: a trigger rejects `UPDATE` and `DELETE`. The primary key makes duplicate appends fail. A unique index on `(workflow_id, command_id, event_type)` stops a command being scheduled or completed twice. |
 | `task` | `task_id`, `workflow_id`, `kind`, `command_id`, `name`, `payload`, `attempt`, `visible_at`, `locked_by`, `locked_until`, plus for activities `failures`, `max_attempts`, `initial_interval_ms`, `backoff_coefficient`, `max_interval_ms`, `start_to_close_ms`, `last_error` | Claimed with `FOR UPDATE SKIP LOCKED` under a lease. `attempt` is a fencing token. An activity task must carry `command_id` and `name`; a workflow task must not. The retry columns are copied from the workflow's call (V3). |
 | `timer` | `timer_id`, `workflow_id`, `timer_seq`, `command_id`, `fire_at`, `fired_at` | Partial index on due timers. Fire time uses the database clock. One timer per workflow command. |
-| `outbox` | `event_id`, `workflow_id`, `event_type`, `payload`, `published_at` | Written in the same transaction as the history append. Relay arrives in Phase 4. |
+| `outbox` | `event_id`, `workflow_id`, `event_type`, `payload`, `published_at` | Written in the same transaction as the history append. Published to Kafka by the relay (Phase 4a). |
 
 ### Three mechanisms worth knowing
 
@@ -142,7 +142,9 @@ What happens when each part dies, and why nothing is lost:
 | Worker dies during a workflow task | Lease expires, task is reassigned, the new worker replays the history. | History is authoritative; workers hold no state. |
 | Server instance dies | Other instances keep serving. The restarted one reads PostgreSQL. | Server is stateless. |
 | Redis is lost | Workers fall back to polling PostgreSQL. Slower, still correct. | Redis never holds state of record. |
-| Kafka is down | Outbox rows accumulate; the relay catches up when Kafka returns. | The outbox is written in the same transaction as the history. |
+| Kafka is down | Outbox rows accumulate; the relay fails fast, retries every tick, and catches up in order when Kafka returns. | The outbox is written in the same transaction as the history. |
+| Two servers run the relay | One gets the advisory lock; the other skips that tick. | `pg_try_advisory_xact_lock` is released on commit or crash. |
+| Relay crashes after Kafka accepted an event | The event is sent again. Consumers dedupe by `event_id`. | At-least-once delivery. |
 | PostgreSQL is down | Engine is unavailable and makes no progress. Nothing is corrupted. Resumes when the database returns. | ACID transactions. |
 | A result is reported twice (network retry) | The second report is rejected or ignored. | `(workflow_id, seq)` is unique; task completion is idempotent. |
 
@@ -216,6 +218,25 @@ Operations, each a single transaction:
 
 `ctx.sleep(duration)` is a command like an activity call and shares its numbering. Replay answers a sleep whose `TimerFired` is recorded immediately, and pauses otherwise. Both sweeps are pulled: something must call them regularly, so a timer fires on the first sweep after it is due.
 
+### Background scheduler and outbox relay (implemented in Phase 4a)
+
+```mermaid
+flowchart LR
+    S1["SweepScheduler<br/>every 1 s"] -->|fireDueTimers, timeOutExpiredActivities| PG[("PostgreSQL")]
+    R1["RelayScheduler<br/>every 0.5 s"] -->|relayBatch| Relay["OutboxRelay<br/>one transaction"]
+    Relay -->|1. try advisory lock<br/>2. read oldest unpublished<br/>5. mark sent rows published| PG
+    Relay -->|3. send in order, key = workflow_id| Kafka[["Kafka topic<br/>revenant.workflow-events"]]
+    Kafka -.->|4. failure: stop, mark only the sent prefix| Relay
+```
+
+| Piece | Behaviour |
+|---|---|
+| `OutboxRelay.relayBatch(max)` | Lock, read, send in `event_id` order, stop at the first failure, mark the sent prefix. Returns published count, skipped flag or the failure. |
+| `KafkaEventSink` | One record per event: key `workflow_id`, value the JSON payload, headers `event_id`, `event_type`, `created_at`. Waits up to 15 s for the broker acknowledgement. |
+| `SweepScheduler` / `RelayScheduler` | Spring `@Scheduled` loops. Exceptions are logged, never fatal. Switch off with `revenant.scheduler.enabled=false` and `revenant.kafka.enabled=false`. |
+
+See ADR-0011 for the reasoning.
+
 ## 9. Roadmap
 
 | Phase | Deliverable | Proves |
@@ -224,7 +245,8 @@ Operations, each a single transaction:
 | 1 | PostgreSQL schema, Flyway migrations, Testcontainers | Storage works against a real database. |
 | 2 | Event-sourced history and the replay core | Deterministic replay, resume from the exact step. |
 | 3 | Retries, timers, timeouts, failure handling | Failures are survivable, not just detectable. |
-| 4 | Redis task wake-ups and Kafka event stream | Acceleration and integration without new points of failure. |
+| 4a | Background scheduler and Kafka outbox relay | Timers and events move without anyone calling by hand. |
+| 4b | Redis task wake-ups | Acceleration without a new point of failure. |
 | 5 | Worker SDK and a demo workflow that survives `kill -9` | End-to-end crash recovery, demonstrated. |
 | 6 | Free deployment, documentation, demo | A running system others can try. |
 

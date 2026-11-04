@@ -3,7 +3,7 @@ plugins {
     alias(libs.plugins.spring.boot)
 }
 
-description = "Spring Boot application: HTTP API, task dispatcher and timer service."
+description = "Spring Boot application: HTTP API, background scheduler and outbox relay."
 
 dependencies {
     implementation(project(":revenant-core"))
@@ -18,6 +18,10 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-flyway")
     implementation("org.flywaydb:flyway-database-postgresql")
     runtimeOnly("org.postgresql:postgresql")
+
+    // Kafka: the outbox relay publishes with the plain producer client. The version is managed
+    // by Spring Boot's dependency management.
+    implementation("org.apache.kafka:kafka-clients")
 
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
     testImplementation("org.springframework.boot:spring-boot-testcontainers")
