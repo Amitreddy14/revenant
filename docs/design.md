@@ -260,6 +260,31 @@ sequenceDiagram
 
 See ADR-0012. Redis holds no state, so losing it only makes workers a little slower to notice work.
 
+### HTTP API and workers (implemented in Phase 5a)
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+    participant W as Worker (your code + SDK)
+    participant PG as PostgreSQL
+    C->>S: POST /workflows (type, input)
+    S->>PG: workflow + history + first workflow task
+    W->>S: POST /tasks/poll (WORKFLOW_TASK), waits
+    S->>PG: claim task (lease)
+    S-->>W: task + whole history
+    Note over W: replays workflow code, decides
+    W->>S: complete-workflow (attempt, commands)
+    S->>PG: one transaction: events, outbox, activity tasks
+    W->>S: POST /tasks/poll (ACTIVITY_TASK)
+    S-->>W: activity name + input
+    Note over W: runs your function
+    W->>S: complete-activity (attempt, result)
+    S->>PG: result recorded, workflow task queued
+```
+
+Everything the worker holds is disposable: kill it at any point and the lease runs out, the task is handed to another worker, and the replay continues from the history. See ADR-0013 for the endpoints and the rules for what a worker does when it cannot help.
+
 ## 9. Roadmap
 
 | Phase | Deliverable | Proves |
@@ -270,7 +295,8 @@ See ADR-0012. Redis holds no state, so losing it only makes workers a little slo
 | 3 | Retries, timers, timeouts, failure handling | Failures are survivable, not just detectable. |
 | 4a | Background scheduler and Kafka outbox relay | Timers and events move without anyone calling by hand. |
 | 4b | Redis task wake-ups | Acceleration without a new point of failure. |
-| 5 | Worker SDK and a demo workflow that survives `kill -9` | End-to-end crash recovery, demonstrated. |
+| 5a | HTTP API and worker SDK | Real programs can run workflows against the server. |
+| 5b | Demo workflow that survives `kill -9` | End-to-end crash recovery, demonstrated. |
 | 6 | Free deployment, documentation, demo | A running system others can try. |
 
 ## 10. Open questions

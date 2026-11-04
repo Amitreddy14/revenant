@@ -93,6 +93,14 @@ public final class WorkflowStore {
         return transactions.execute(connection -> tasks.claim(connection, kind, workerId, lease));
     }
 
+    /**
+     * Finds a task by the id and attempt a worker was given when it claimed it. Empty means the
+     * lease is gone (expired and re-claimed, or already completed). See {@link TaskRepository#findLeased}.
+     */
+    public Optional<ClaimedTask> findLeasedTask(long taskId, int attempt) {
+        return transactions.execute(connection -> tasks.findLeased(connection, taskId, attempt));
+    }
+
     /** Marks a claimed task done. Returns false if the lease was lost. See {@link TaskRepository#complete}. */
     public boolean completeTask(long taskId, int attempt) {
         return transactions.execute(connection -> tasks.complete(connection, taskId, attempt));

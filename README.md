@@ -7,7 +7,7 @@
 ![Spring Boot 4.1](https://img.shields.io/badge/Spring%20Boot-4.1-brightgreen)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow)
 
-**Status: Phase 4b (Redis wake-ups).** Activities retry with exponential backoff, workflows can sleep for days with durable timers, and hung activities time out. The server now fires timers by itself and publishes every workflow event to Kafka through a transactional outbox. Redis now carries wake-up hints so workers notice new work quickly, and the engine runs the same without it. The worker SDK comes next (see the [roadmap](#roadmap)).
+**Status: Phase 5a (HTTP API and worker SDK).** Activities retry with exponential backoff, workflows can sleep for days with durable timers, and hung activities time out. The server now fires timers by itself and publishes every workflow event to Kafka through a transactional outbox. Redis now carries wake-up hints so workers notice new work quickly, and the engine runs the same without it. Workflows can now be started over HTTP and run by workers written with the Java SDK. The `kill -9` demo comes next (see the [roadmap](#roadmap)).
 
 ## Why it exists
 
@@ -59,6 +59,35 @@ Without Kafka, start the server with `--revenant.kafka.enabled=false`; the engin
 
 Stop everything with `docker compose down` (add `-v` to also delete the data).
 
+## Writing a workflow and a worker
+
+A workflow is ordinary Java. Each `callActivity` is remembered in the history, so after a crash the code runs again from the top and the finished calls return their recorded results instead of running twice.
+
+```java
+RevenantClient client = new RevenantClient("http://localhost:8080");
+
+WorkflowDefinition order = (ctx, input) -> {
+    String charge = ctx.callActivity("charge", input);
+    return ctx.callActivity("ship", charge);
+};
+
+Worker worker = Worker.builder(client)
+        .workflow("Order", order)
+        .activity("charge", in -> "{\"charged\":true}")
+        .activity("ship", in -> "{\"tracking\":\"T-1\"}")
+        .build();
+worker.start();
+
+WorkflowId id = client.startWorkflow("Order", "{\"orderId\":7}");
+```
+
+The same API is available over plain HTTP (see [ADR-0013](docs/adr/0013-http-api-and-worker-protocol.md)):
+
+```powershell
+curl.exe -X POST "http://localhost:8080/api/v1/workflows?type=Order" -H "Content-Type: application/json" -d "{}"
+curl.exe http://localhost:8080/api/v1/workflows/<workflowId>
+```
+
 ## Repository layout
 
 ```
@@ -84,7 +113,8 @@ revenant/
 | 3 | Retries, timers, timeouts, failure handling | Done |
 | 4a | Background scheduler and Kafka outbox relay | Done |
 | 4b | Redis task wake-ups (accelerator only) | Done |
-| 5 | Worker SDK and a demo workflow that survives `kill -9` | Next |
+| 5a | HTTP API and worker SDK | Done |
+| 5b | Demo workflow that survives `kill -9` | Next |
 | 6 | Free deployment, documentation, demo | Planned |
 
 ## Contributing and Git workflow

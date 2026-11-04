@@ -16,3 +16,4 @@ Each ADR captures one significant decision: the context, what was decided, and t
 | [0010](0010-retries-timers-and-timeouts.md) | Retries on the task row, durable timers as commands, start-to-close timeouts via a sweep | Accepted |
 | [0011](0011-outbox-relay-and-background-scheduler.md) | Outbox relay with an advisory lock, stop-at-first-failure ordering, and a pulling background scheduler | Accepted |
 | [0012](0012-redis-wake-up-hints.md) | Redis pub/sub as an after-commit wake-up hint, with a polling timeout as the guarantee | Accepted |
+| [0013](0013-http-api-and-worker-protocol.md) | HTTP long-polling API; workers replay locally and the lease (task id + attempt) is the only credential | Accepted |
