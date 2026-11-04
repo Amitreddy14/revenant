@@ -7,6 +7,21 @@ spring:
     username: ${REVENANT_DB_USER:revenant}
     password: ${REVENANT_DB_PASSWORD:revenant}
 
+revenant:
+  scheduler:
+    # Fires due timers and fails attempts that outlived their timeout (ADR-0010).
+    enabled: true
+    interval: PT1S
+    batch-size: 100
+  kafka:
+    # Set enabled: false to run without Kafka; events then wait in the outbox (ADR-0005).
+    enabled: true
+    bootstrap-servers: ${REVENANT_KAFKA_BOOTSTRAP:localhost:9092}
+    topic: revenant.workflow-events
+  relay:
+    interval: PT0.5S
+    batch-size: 100
+
 server:
   port: 8080
   shutdown: graceful
