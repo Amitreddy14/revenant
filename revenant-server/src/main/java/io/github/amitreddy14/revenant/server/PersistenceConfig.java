@@ -1,5 +1,6 @@
 package io.github.amitreddy14.revenant.server;
 
+import io.github.amitreddy14.revenant.persistence.TaskNotifier;
 import io.github.amitreddy14.revenant.persistence.WorkflowStore;
 import javax.sql.DataSource;
 import org.springframework.context.annotation.Bean;
@@ -10,7 +11,7 @@ import org.springframework.context.annotation.Configuration;
 class PersistenceConfig {
 
     @Bean
-    WorkflowStore workflowStore(DataSource dataSource) {
-        return new WorkflowStore(dataSource);
+    WorkflowStore workflowStore(DataSource dataSource, TaskNotifier notifier) {
+        return new WorkflowStore(dataSource, notifier);
     }
 }

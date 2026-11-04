@@ -19,7 +19,8 @@ import org.testcontainers.postgresql.PostgreSQLContainer;
  * Docker must be running.
  */
 @Testcontainers
-@SpringBootTest(properties = {"revenant.kafka.enabled=false", "revenant.scheduler.enabled=false"})
+@SpringBootTest(properties = {"revenant.kafka.enabled=false", "revenant.scheduler.enabled=false",
+        "revenant.redis.enabled=false"})
 class RevenantServerApplicationTests {
 
     @Container

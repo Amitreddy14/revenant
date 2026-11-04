@@ -37,8 +37,28 @@ public final class WorkflowStore {
     private final TimerRepository timers = new TimerRepository();
     private final OutboxRepository outbox = new OutboxRepository();
 
+    private final TaskNotifier notifier;
+
     public WorkflowStore(DataSource dataSource) {
+        this(dataSource, TaskNotifier.none());
+    }
+
+    /**
+     * @param notifier told after a commit that new tasks may be ready; a missing or failing
+     *                 notifier never affects the data, only how fast workers notice work
+     */
+    public WorkflowStore(DataSource dataSource, TaskNotifier notifier) {
         this.transactions = new Transactions(dataSource);
+        this.notifier = notifier;
+    }
+
+    /** Best effort, after commit. A failure here must never undo or fail committed work. */
+    private void wake(TaskKind kind) {
+        try {
+            notifier.tasksMayBeReady(kind);
+        } catch (RuntimeException ignored) {
+            // The task is already in the database; polling will find it.
+        }
     }
 
     /**
@@ -57,6 +77,7 @@ public final class WorkflowStore {
             outbox.enqueue(connection, id, started.type(), started.payloadJson());
             tasks.enqueue(connection, id, TaskKind.WORKFLOW_TASK, "{}", Duration.ZERO);
         });
+        wake(TaskKind.WORKFLOW_TASK);
     }
 
     public Optional<WorkflowExecution> find(WorkflowId id) {
@@ -88,7 +109,7 @@ public final class WorkflowStore {
      */
     public CompletionOutcome completeWorkflowTask(ClaimedTask task, long decidedAtSeq, Decision decision) {
         requireKind(task, TaskKind.WORKFLOW_TASK);
-        return transactions.execute(connection -> {
+        CompletionOutcome outcome = transactions.execute(connection -> {
             if (!tasks.complete(connection, task.taskId(), task.attempt())) {
                 return CompletionOutcome.LEASE_LOST;
             }
@@ -129,6 +150,10 @@ public final class WorkflowStore {
             }
             return CompletionOutcome.APPLIED;
         });
+        if (outcome == CompletionOutcome.APPLIED && !decision.activitiesToSchedule().isEmpty()) {
+            wake(TaskKind.ACTIVITY_TASK);
+        }
+        return outcome;
     }
 
     /**
@@ -145,7 +170,12 @@ public final class WorkflowStore {
      */
     public CompletionOutcome completeActivityTask(ClaimedTask task, ActivityResult result) {
         requireKind(task, TaskKind.ACTIVITY_TASK);
-        return transactions.execute(connection -> applyActivityResult(connection, task, result));
+        CompletionOutcome outcome = transactions.execute(connection -> applyActivityResult(connection, task, result));
+        // A scheduled retry becomes visible only after its backoff, so polling covers that case.
+        if (outcome == CompletionOutcome.APPLIED) {
+            wake(TaskKind.WORKFLOW_TASK);
+        }
+        return outcome;
     }
 
     /**
@@ -163,6 +193,10 @@ public final class WorkflowStore {
         int handled = 0;
         while (handled < max && transactions.execute(this::timeOutOneActivity)) {
             handled++;
+        }
+        if (handled > 0) {
+            wake(TaskKind.WORKFLOW_TASK);
+            wake(TaskKind.ACTIVITY_TASK);
         }
         return handled;
     }
@@ -190,6 +224,9 @@ public final class WorkflowStore {
         int fired = 0;
         while (fired < max && transactions.execute(this::fireOneTimer)) {
             fired++;
+        }
+        if (fired > 0) {
+            wake(TaskKind.WORKFLOW_TASK);
         }
         return fired;
     }
