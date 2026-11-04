@@ -11,6 +11,8 @@ import io.github.amitreddy14.revenant.core.TaskKind;
 import io.github.amitreddy14.revenant.core.WorkflowExecution;
 import io.github.amitreddy14.revenant.core.WorkflowId;
 import io.github.amitreddy14.revenant.core.WorkflowStatus;
+import java.sql.Connection;
+import java.sql.SQLException;
 import java.time.Duration;
 import java.util.List;
 import java.util.Optional;
@@ -25,9 +27,14 @@ import javax.sql.DataSource;
  */
 public final class WorkflowStore {
 
+    /** The error recorded when an attempt outlives its start-to-close timeout. */
+    static final String TIMEOUT_ERROR =
+            "{\"type\":\"ActivityTimeout\",\"message\":\"the attempt exceeded its start-to-close timeout\"}";
+
     private final Transactions transactions;
     private final WorkflowRepository workflows = new WorkflowRepository();
     private final TaskRepository tasks = new TaskRepository();
+    private final TimerRepository timers = new TimerRepository();
     private final OutboxRepository outbox = new OutboxRepository();
 
     public WorkflowStore(DataSource dataSource) {
@@ -104,8 +111,17 @@ public final class WorkflowStore {
                 outbox.enqueue(connection, task.workflowId(), event.type(), event.payloadJson());
             }
             for (Command.ScheduleActivity activity : decision.activitiesToSchedule()) {
-                tasks.enqueueActivity(
-                        connection, task.workflowId(), activity.commandId(), activity.name(), activity.inputJson());
+                tasks.enqueueActivity(connection, task.workflowId(), activity.commandId(), activity.name(),
+                        activity.inputJson(), activity.options());
+            }
+            // Each command became exactly one event, in order, so a command's sequence number
+            // is the last sequence number the decision was based on plus its position.
+            long seq = decidedAtSeq;
+            for (Command command : decision.commands()) {
+                seq++;
+                if (command instanceof Command.StartTimer timer) {
+                    timers.start(connection, task.workflowId(), seq, timer.commandId(), timer.durationMillis());
+                }
             }
             Optional<WorkflowStatus> closing = decision.closesWorkflowAs();
             if (closing.isPresent()) {
@@ -116,30 +132,121 @@ public final class WorkflowStore {
     }
 
     /**
-     * Commits an activity's result in one transaction: removes the activity task, appends
-     * {@code ActivityCompleted} or {@code ActivityFailed}, writes the outbox row and queues a
-     * workflow task so the workflow code can continue.
+     * Commits an activity attempt's outcome in one transaction.
+     *
+     * <ul>
+     *   <li>success: removes the task, appends {@code ActivityCompleted}, queues a workflow task;
+     *   <li>failure that the retry policy allows to be retried: counts the failure and puts the
+     *       task back on the queue after the backoff; the history is untouched
+     *       ({@link CompletionOutcome#RETRY_SCHEDULED});
+     *   <li>any other failure (attempts used up, or not retryable): removes the task, appends
+     *       {@code ActivityFailed}, queues a workflow task.
+     * </ul>
      */
     public CompletionOutcome completeActivityTask(ClaimedTask task, ActivityResult result) {
         requireKind(task, TaskKind.ACTIVITY_TASK);
-        return transactions.execute(connection -> {
-            if (!tasks.complete(connection, task.taskId(), task.attempt())) {
+        return transactions.execute(connection -> applyActivityResult(connection, task, result));
+    }
+
+    /**
+     * Fails activity attempts that outlived their start-to-close timeout. Each one is treated like
+     * a reported failure: retried if its policy allows, otherwise recorded as {@code ActivityFailed}.
+     * The worker that was running the attempt is fenced out, so its late result is ignored.
+     *
+     * <p>Something must call this regularly (the server's scheduler in a later phase, or a worker
+     * loop); until it runs, a timed-out attempt just waits.
+     *
+     * @param max the most attempts to handle in this call
+     * @return how many attempts were handled
+     */
+    public int timeOutExpiredActivities(int max) {
+        int handled = 0;
+        while (handled < max && transactions.execute(this::timeOutOneActivity)) {
+            handled++;
+        }
+        return handled;
+    }
+
+    private boolean timeOutOneActivity(Connection connection) throws SQLException {
+        Optional<ClaimedTask> expired = tasks.lockTimedOut(connection);
+        if (expired.isEmpty()) {
+            return false;
+        }
+        applyActivityResult(connection, expired.get(), ActivityResult.failure(TIMEOUT_ERROR));
+        return true;
+    }
+
+    /**
+     * Fires timers that are due: for each one, appends {@code TimerFired} and queues a workflow
+     * task so the workflow can continue. A timer whose workflow has already closed is just marked
+     * as fired.
+     *
+     * <p>Like {@link #timeOutExpiredActivities}, something must call this regularly.
+     *
+     * @param max the most timers to fire in this call
+     * @return how many timers were fired
+     */
+    public int fireDueTimers(int max) {
+        int fired = 0;
+        while (fired < max && transactions.execute(this::fireOneTimer)) {
+            fired++;
+        }
+        return fired;
+    }
+
+    private boolean fireOneTimer(Connection connection) throws SQLException {
+        Optional<TimerRepository.Due> due = timers.lockNextDue(connection);
+        if (due.isEmpty()) {
+            return false;
+        }
+        WorkflowRepository.Locked workflow = workflows.lock(connection, due.get().workflowId())
+                .orElseThrow(() -> new IllegalStateException("Workflow " + due.get().workflowId() + " does not exist"));
+        if (workflow.status() == WorkflowStatus.RUNNING) {
+            NewEvent event = Events.timerFired(due.get().commandId());
+            workflows.append(connection, due.get().workflowId(), workflow.lastSeq(), List.of(event));
+            outbox.enqueue(connection, due.get().workflowId(), event.type(), event.payloadJson());
+            tasks.enqueue(connection, due.get().workflowId(), TaskKind.WORKFLOW_TASK, "{}", Duration.ZERO);
+        }
+        timers.markFired(connection, due.get().timerId());
+        return true;
+    }
+
+    private CompletionOutcome applyActivityResult(Connection connection, ClaimedTask task,
+            ActivityResult result) throws SQLException {
+        if (!result.succeeded() && result.retryable()) {
+            Optional<TaskRepository.FailureState> state =
+                    tasks.lockForFailure(connection, task.taskId(), task.attempt());
+            if (state.isEmpty()) {
                 return CompletionOutcome.LEASE_LOST;
             }
-            WorkflowRepository.Locked workflow = workflows.lock(connection, task.workflowId())
-                    .orElseThrow(() -> new IllegalStateException("Workflow " + task.workflowId() + " does not exist"));
-            if (workflow.status() != WorkflowStatus.RUNNING) {
-                return CompletionOutcome.STALE_DISCARDED;
+            Optional<Duration> delay = state.get().retryPolicy().delayAfterFailure(state.get().failures() + 1);
+            if (delay.isPresent()) {
+                tasks.scheduleRetry(connection, task.taskId(), result.payloadJson(), delay.get());
+                return CompletionOutcome.RETRY_SCHEDULED;
             }
+        }
+        return finishActivity(connection, task, result);
+    }
 
-            NewEvent event = result.succeeded()
-                    ? Events.activityCompleted(task.commandId(), task.name(), result.payloadJson())
-                    : Events.activityFailed(task.commandId(), task.name(), result.payloadJson());
-            workflows.append(connection, task.workflowId(), workflow.lastSeq(), List.of(event));
-            outbox.enqueue(connection, task.workflowId(), event.type(), event.payloadJson());
-            tasks.enqueue(connection, task.workflowId(), TaskKind.WORKFLOW_TASK, "{}", Duration.ZERO);
-            return CompletionOutcome.APPLIED;
-        });
+    /** The activity is done for good, one way or the other: record it and wake the workflow. */
+    private CompletionOutcome finishActivity(Connection connection, ClaimedTask task,
+            ActivityResult result) throws SQLException {
+        if (!tasks.complete(connection, task.taskId(), task.attempt())) {
+            return CompletionOutcome.LEASE_LOST;
+        }
+        WorkflowRepository.Locked workflow = workflows.lock(connection, task.workflowId())
+                .orElseThrow(() -> new IllegalStateException("Workflow " + task.workflowId() + " does not exist"));
+        if (workflow.status() != WorkflowStatus.RUNNING) {
+            return CompletionOutcome.STALE_DISCARDED;
+        }
+
+        NewEvent event = result.succeeded()
+                ? Events.activityCompleted(task.commandId(), task.name(), result.payloadJson())
+                : Events.activityFailed(task.commandId(), task.name(), result.payloadJson());
+        workflows.append(connection, task.workflowId(), workflow.lastSeq(), List.of(event));
+        outbox.enqueue(connection, task.workflowId(), event.type(), event.payloadJson());
+        tasks.enqueue(connection, task.workflowId(), TaskKind.WORKFLOW_TASK, "{}", Duration.ZERO);
+        return CompletionOutcome.APPLIED;
     }
 
     private static void requireKind(ClaimedTask task, TaskKind expected) {

@@ -1,6 +1,8 @@
 package io.github.amitreddy14.revenant.persistence;
 
+import io.github.amitreddy14.revenant.core.ActivityOptions;
 import io.github.amitreddy14.revenant.core.ClaimedTask;
+import io.github.amitreddy14.revenant.core.RetryPolicy;
 import io.github.amitreddy14.revenant.core.TaskKind;
 import io.github.amitreddy14.revenant.core.WorkflowId;
 import java.sql.Connection;
@@ -23,23 +25,58 @@ public final class TaskRepository {
                     + "VALUES (?, ?, ?, ?, ?::jsonb, now() + (?::bigint * interval '1 millisecond')) "
                     + "RETURNING task_id";
 
-    // Pick the oldest claimable task (never claimed, or its lease expired) and lease it, atomically.
+    static final String INSERT_ACTIVITY_TASK =
+            "INSERT INTO task (workflow_id, kind, command_id, name, payload, max_attempts, "
+                    + "initial_interval_ms, backoff_coefficient, max_interval_ms, start_to_close_ms) "
+                    + "VALUES (?, 'ACTIVITY_TASK', ?, ?, ?::jsonb, ?, ?, ?, ?, ?) "
+                    + "RETURNING task_id";
+
+    // Pick the oldest claimable task and lease it, atomically. Claimable means: never claimed, or
+    // its lease expired. A task with a start-to-close timeout is the exception: once its deadline
+    // passes it is not handed out again but failed by the timeout sweep, so the failure is counted.
+    // The lease of such a task is its timeout.
     static final String CLAIM_TASK =
             "WITH next AS ( "
                     + "SELECT task_id FROM task "
                     + "WHERE kind = ? AND visible_at <= now() "
-                    + "AND (locked_until IS NULL OR locked_until <= now()) "
+                    + "AND (locked_until IS NULL OR (locked_until <= now() AND start_to_close_ms IS NULL)) "
                     + "ORDER BY visible_at, task_id "
                     + "LIMIT 1 "
                     + "FOR UPDATE SKIP LOCKED) "
                     + "UPDATE task t "
-                    + "SET locked_by = ?, locked_until = now() + (?::bigint * interval '1 millisecond'), "
+                    + "SET locked_by = ?, "
+                    + "locked_until = now() + (COALESCE(t.start_to_close_ms, ?::bigint) * interval '1 millisecond'), "
                     + "attempt = t.attempt + 1 "
                     + "FROM next WHERE t.task_id = next.task_id "
                     + "RETURNING t.task_id, t.workflow_id, t.kind, t.command_id, t.name, t.payload::text, t.attempt";
 
-    // The attempt number is a fencing token: a worker whose lease expired cannot complete the task.
-    static final String COMPLETE_TASK = "DELETE FROM task WHERE task_id = ? AND attempt = ?";
+    // The attempt number is a fencing token: a worker whose task was handed to someone else cannot
+    // complete it. A task that is not leased (it was put back for a retry) cannot be completed either.
+    static final String COMPLETE_TASK =
+            "DELETE FROM task WHERE task_id = ? AND attempt = ? AND locked_by IS NOT NULL";
+
+    // Reads the retry settings of a leased task and locks its row, fenced like COMPLETE_TASK.
+    static final String LOCK_FOR_FAILURE =
+            "SELECT failures, max_attempts, initial_interval_ms, backoff_coefficient, max_interval_ms "
+                    + "FROM task WHERE task_id = ? AND attempt = ? AND locked_by IS NOT NULL FOR UPDATE";
+
+    // Puts a failed task back on the queue after the backoff. It keeps its attempt number; the next
+    // claim increments it, which fences out the worker that just failed.
+    static final String SCHEDULE_RETRY =
+            "UPDATE task SET failures = failures + 1, last_error = ?::jsonb, "
+                    + "visible_at = now() + (?::bigint * interval '1 millisecond'), "
+                    + "locked_by = NULL, locked_until = NULL "
+                    + "WHERE task_id = ?";
+
+    // The oldest leased activity whose start-to-close deadline has passed.
+    static final String LOCK_TIMED_OUT =
+            "SELECT task_id, workflow_id, command_id, name, payload::text, attempt FROM task "
+                    + "WHERE kind = 'ACTIVITY_TASK' AND start_to_close_ms IS NOT NULL "
+                    + "AND locked_by IS NOT NULL AND locked_until <= now() "
+                    + "ORDER BY locked_until, task_id LIMIT 1 FOR UPDATE SKIP LOCKED";
+
+    /** The retry settings and failure count of an activity task, read under a row lock. */
+    public record FailureState(int failures, RetryPolicy retryPolicy) {}
 
     /**
      * Adds a workflow task to the queue ("your workflow has new events, decide what to do next").
@@ -67,7 +104,33 @@ public final class TaskRepository {
      */
     public long enqueueActivity(Connection connection, WorkflowId workflowId, long commandId, String name,
             String inputJson) throws SQLException {
-        return insert(connection, workflowId, TaskKind.ACTIVITY_TASK, commandId, name, inputJson, Duration.ZERO);
+        return enqueueActivity(connection, workflowId, commandId, name, inputJson, ActivityOptions.defaults());
+    }
+
+    /**
+     * Adds an activity task with a retry policy and an optional start-to-close timeout.
+     *
+     * @return the new task id
+     */
+    public long enqueueActivity(Connection connection, WorkflowId workflowId, long commandId, String name,
+            String inputJson, ActivityOptions options) throws SQLException {
+        RetryPolicy policy = options.retryPolicy();
+        try (PreparedStatement statement = connection.prepareStatement(INSERT_ACTIVITY_TASK)) {
+            statement.setObject(1, workflowId.value());
+            statement.setLong(2, commandId);
+            statement.setString(3, name);
+            statement.setString(4, inputJson);
+            statement.setInt(5, policy.maxAttempts());
+            statement.setLong(6, policy.initialInterval().toMillis());
+            statement.setDouble(7, policy.backoffCoefficient());
+            statement.setLong(8, policy.maxInterval().toMillis());
+            Duration timeout = options.startToCloseTimeout();
+            statement.setObject(9, timeout == null ? null : timeout.toMillis(), Types.BIGINT);
+            try (ResultSet row = statement.executeQuery()) {
+                row.next();
+                return row.getLong(1);
+            }
+        }
     }
 
     private long insert(Connection connection, WorkflowId workflowId, TaskKind kind, Long commandId, String name,
@@ -127,6 +190,64 @@ public final class TaskRepository {
             statement.setLong(1, taskId);
             statement.setInt(2, attempt);
             return statement.executeUpdate() == 1;
+        }
+    }
+
+    /**
+     * Reads the retry settings of a leased activity task and locks its row until the transaction
+     * ends.
+     *
+     * @return empty if the task is gone, was re-claimed since ({@code attempt} no longer matches),
+     *         or is not currently leased
+     */
+    public Optional<FailureState> lockForFailure(Connection connection, long taskId, int attempt)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(LOCK_FOR_FAILURE)) {
+            statement.setLong(1, taskId);
+            statement.setInt(2, attempt);
+            try (ResultSet row = statement.executeQuery()) {
+                if (!row.next()) {
+                    return Optional.empty();
+                }
+                RetryPolicy policy = new RetryPolicy(
+                        row.getInt(2),
+                        Duration.ofMillis(row.getLong(3)),
+                        row.getDouble(4),
+                        Duration.ofMillis(row.getLong(5)));
+                return Optional.of(new FailureState(row.getInt(1), policy));
+            }
+        }
+    }
+
+    /** Counts a failed attempt and puts the task back on the queue, claimable after {@code delay}. */
+    public void scheduleRetry(Connection connection, long taskId, String errorJson, Duration delay)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(SCHEDULE_RETRY)) {
+            statement.setString(1, errorJson);
+            statement.setLong(2, delay.toMillis());
+            statement.setLong(3, taskId);
+            statement.executeUpdate();
+        }
+    }
+
+    /**
+     * Finds one activity whose start-to-close timeout has passed and locks it. Rows locked by
+     * another transaction are skipped, so several sweepers can run side by side.
+     */
+    public Optional<ClaimedTask> lockTimedOut(Connection connection) throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(LOCK_TIMED_OUT);
+                ResultSet row = statement.executeQuery()) {
+            if (!row.next()) {
+                return Optional.empty();
+            }
+            return Optional.of(new ClaimedTask(
+                    row.getLong(1),
+                    new WorkflowId(row.getObject(2, UUID.class)),
+                    TaskKind.ACTIVITY_TASK,
+                    row.getLong(3),
+                    row.getString(4),
+                    row.getString(5),
+                    row.getInt(6)));
         }
     }
 }

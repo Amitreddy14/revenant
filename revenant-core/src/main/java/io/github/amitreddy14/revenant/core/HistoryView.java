@@ -15,7 +15,7 @@ final class HistoryView {
     private final String startInput;
     private final Map<Long, HistoryEvent> scheduled = new HashMap<>();
     private final Map<Long, HistoryEvent> finished = new HashMap<>();
-    private long lastScheduledCommandId;
+    private long lastCommandId;
     private boolean closed;
 
     private HistoryView(String startInput) {
@@ -54,31 +54,46 @@ final class HistoryView {
     private void accept(HistoryEvent event) {
         switch (event.type()) {
             case EventType.ACTIVITY_SCHEDULED -> {
-                long id = requireCommand(event);
                 if (event.name() == null) {
                     throw new InvalidHistoryException("event " + event.seq() + " has no activity name");
                 }
-                if (id != lastScheduledCommandId + 1) {
-                    throw new InvalidHistoryException("event " + event.seq() + " schedules command " + id
-                            + " but command " + (lastScheduledCommandId + 1) + " was expected");
-                }
-                lastScheduledCommandId = id;
-                scheduled.put(id, event);
+                registerCommand(event);
             }
-            case EventType.ACTIVITY_COMPLETED, EventType.ACTIVITY_FAILED -> {
-                long id = requireCommand(event);
-                if (!scheduled.containsKey(id)) {
-                    throw new InvalidHistoryException(
-                            "event " + event.seq() + " answers command " + id + " which was never scheduled");
-                }
-                if (finished.put(id, event) != null) {
-                    throw new InvalidHistoryException(
-                            "command " + id + " has more than one result (event " + event.seq() + ")");
-                }
-            }
+            case EventType.TIMER_STARTED -> registerCommand(event);
+            case EventType.ACTIVITY_COMPLETED, EventType.ACTIVITY_FAILED ->
+                recordResult(event, EventType.ACTIVITY_SCHEDULED);
+            case EventType.TIMER_FIRED -> recordResult(event, EventType.TIMER_STARTED);
             case EventType.WORKFLOW_COMPLETED, EventType.WORKFLOW_FAILED -> closed = true;
             default -> throw new InvalidHistoryException(
                     "event " + event.seq() + " has unexpected type " + event.type());
+        }
+    }
+
+    /** Activity calls and timers share one numbering: each new command is the next number. */
+    private void registerCommand(HistoryEvent event) {
+        long id = requireCommand(event);
+        if (id != lastCommandId + 1) {
+            throw new InvalidHistoryException("event " + event.seq() + " starts command " + id
+                    + " but command " + (lastCommandId + 1) + " was expected");
+        }
+        lastCommandId = id;
+        scheduled.put(id, event);
+    }
+
+    private void recordResult(HistoryEvent event, String expectedStartType) {
+        long id = requireCommand(event);
+        HistoryEvent start = scheduled.get(id);
+        if (start == null) {
+            throw new InvalidHistoryException(
+                    "event " + event.seq() + " answers command " + id + " which was never started");
+        }
+        if (!expectedStartType.equals(start.type())) {
+            throw new InvalidHistoryException("event " + event.seq() + " (" + event.type() + ") answers command "
+                    + id + " but that command is a " + start.type() + ", not a " + expectedStartType);
+        }
+        if (finished.put(id, event) != null) {
+            throw new InvalidHistoryException(
+                    "command " + id + " has more than one result (event " + event.seq() + ")");
         }
     }
 
@@ -97,17 +112,17 @@ final class HistoryView {
         return closed;
     }
 
-    /** The ActivityScheduled event for a command, or null if the workflow has not issued it yet. */
+    /** The ActivityScheduled or TimerStarted event for a command, or null if the workflow has not issued it yet. */
     HistoryEvent scheduled(long commandId) {
         return scheduled.get(commandId);
     }
 
-    /** The ActivityCompleted or ActivityFailed event for a command, or null if it is still running. */
+    /** The ActivityCompleted, ActivityFailed or TimerFired event for a command, or null if it is still pending. */
     HistoryEvent finished(long commandId) {
         return finished.get(commandId);
     }
 
-    long lastScheduledCommandId() {
-        return lastScheduledCommandId;
+    long lastCommandId() {
+        return lastCommandId;
     }
 }

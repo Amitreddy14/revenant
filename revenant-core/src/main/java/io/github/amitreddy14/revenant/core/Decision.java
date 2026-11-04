@@ -28,6 +28,7 @@ public record Decision(List<Command> commands) {
         return commands.stream()
                 .map(command -> switch (command) {
                     case Command.ScheduleActivity c -> Events.activityScheduled(c.commandId(), c.name(), c.inputJson());
+                    case Command.StartTimer c -> Events.timerStarted(c.commandId(), c.durationMillis());
                     case Command.CompleteWorkflow c -> Events.workflowCompleted(c.resultJson());
                     case Command.FailWorkflow c -> Events.workflowFailed(c.errorJson());
                 })
@@ -39,6 +40,14 @@ public record Decision(List<Command> commands) {
         return commands.stream()
                 .filter(Command.ScheduleActivity.class::isInstance)
                 .map(Command.ScheduleActivity.class::cast)
+                .toList();
+    }
+
+    /** The timers to start. */
+    public List<Command.StartTimer> timersToStart() {
+        return commands.stream()
+                .filter(Command.StartTimer.class::isInstance)
+                .map(Command.StartTimer.class::cast)
                 .toList();
     }
 
