@@ -26,6 +26,19 @@ class CoreTypesTest {
     }
 
     @Test
+    void commandIdsStartAtOne() {
+        assertThatIllegalArgumentException().isThrownBy(() -> new NewEvent("ActivityScheduled", 0L, "charge", "{}"));
+        assertThat(Events.activityScheduled(1, "charge", "{}").commandId()).isEqualTo(1L);
+    }
+
+    @Test
+    void onlyWorkflowCompletedAndFailedAreTerminal() {
+        assertThat(EventType.isTerminal(EventType.WORKFLOW_COMPLETED)).isTrue();
+        assertThat(EventType.isTerminal(EventType.WORKFLOW_FAILED)).isTrue();
+        assertThat(EventType.isTerminal(EventType.ACTIVITY_COMPLETED)).isFalse();
+    }
+
+    @Test
     void onlyRunningWorkflowsAreOpen() {
         assertThat(WorkflowStatus.RUNNING.isClosed()).isFalse();
         assertThat(WorkflowStatus.COMPLETED.isClosed()).isTrue();

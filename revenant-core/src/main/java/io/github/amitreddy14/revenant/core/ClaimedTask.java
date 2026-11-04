@@ -8,11 +8,15 @@ import java.util.Objects;
  * @param taskId      queue identifier
  * @param workflowId  the workflow the task belongs to
  * @param kind        what to do
- * @param payloadJson task data as a JSON document
+ * @param commandId   for an activity task, the command it answers; {@code null} for a workflow task
+ * @param name        for an activity task, the activity to run; {@code null} for a workflow task
+ * @param payloadJson task data as a JSON document (the activity input for an activity task)
  * @param attempt     1 on the first claim, +1 every time the task is claimed again. Pass it back
  *                    when completing: it fences out a worker whose lease already expired.
  */
-public record ClaimedTask(long taskId, WorkflowId workflowId, TaskKind kind, String payloadJson, int attempt) {
+public record ClaimedTask(
+        long taskId, WorkflowId workflowId, TaskKind kind, Long commandId, String name, String payloadJson,
+        int attempt) {
 
     public ClaimedTask {
         Objects.requireNonNull(workflowId, "workflowId");

@@ -7,7 +7,7 @@
 ![Spring Boot 4.1](https://img.shields.io/badge/Spring%20Boot-4.1-brightgreen)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow)
 
-**Status: Phase 1 (storage).** The PostgreSQL schema, migrations and a tested storage layer are in place; the replay engine itself is built next (see the [roadmap](#roadmap)).
+**Status: Phase 2 (replay core).** The replay engine works and is tested by crashing it at every point; retries, timers and the worker SDK come next (see the [roadmap](#roadmap)).
 
 ## Why it exists
 
@@ -55,7 +55,7 @@ Stop everything with `docker compose down` (add `-v` to also delete the data).
 
 ```
 revenant/
-├── revenant-core/          pure engine logic: history, replay, retry policy (no frameworks)
+├── revenant-core/          pure engine logic: history, replay (Decider), no dependencies
 ├── revenant-persistence/   SQL migrations, JDBC repositories, transactions (no Spring)
 ├── revenant-worker-sdk/    the library workflow authors depend on
 ├── revenant-server/        Spring Boot application
@@ -72,8 +72,8 @@ revenant/
 |---|---|---|
 | 0 | Design doc, ADRs, Gradle scaffold, Docker Compose, CI | Done |
 | 1 | PostgreSQL schema, Flyway migrations, Testcontainers | Done |
-| 2 | Event-sourced history and the replay core | Next |
-| 3 | Retries, timers, timeouts, failure handling | Planned |
+| 2 | Event-sourced history and the replay core | Done |
+| 3 | Retries, timers, timeouts, failure handling | Next |
 | 4 | Redis task wake-ups and Kafka event stream | Planned |
 | 5 | Worker SDK and a demo workflow that survives `kill -9` | Planned |
 | 6 | Free deployment, documentation, demo | Planned |
