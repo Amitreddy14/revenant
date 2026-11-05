@@ -125,6 +125,10 @@ What you should see:
 
 The script ends with `PASS` or `FAIL` for each count. Note the honest guarantee: Revenant gives **at-least-once** execution of an interrupted activity, and **exactly-once recording** of its result. The interrupted step must be safe to repeat, which is why the demo derives its ids from the order id (idempotency). Logs are written to `demo-logs/`. See [docs/demo.md](docs/demo.md) for the timeline.
 
+## Deploying it for free
+
+`deploy/` holds a production-style stack: PostgreSQL, Redis, the server and a Caddy proxy that serves HTTPS, with API keys required and only ports 80 and 443 open. [docs/deploy.md](docs/deploy.md) walks from creating a free Oracle Cloud account to running the `kill -9` demo on a public server (`scripts/demo-kill-worker.sh`). The container images build in CI; the full deployment is something you prove once on your own VM. Design: [ADR-0016](docs/adr/0016-single-vm-docker-compose-deployment.md).
+
 ## Repository layout
 
 ```
@@ -134,7 +138,9 @@ revenant/
 ├── revenant-worker-sdk/    the library workflow authors depend on
 ├── revenant-server/        Spring Boot application
 ├── revenant-demo/          order workflow + worker for the kill -9 demo
-├── scripts/                demo-kill-worker.ps1
+├── deploy/                 production compose file, Caddyfile, .env.example
+├── Dockerfile              server and demo-worker images
+├── scripts/                demo-kill-worker.ps1 (Windows), demo-kill-worker.sh (the VM)
 ├── docs/
 │   ├── design.md           architecture, failure model, semantics
 │   └── adr/                architecture decision records
@@ -155,7 +161,7 @@ revenant/
 | 5a | HTTP API and worker SDK | Done |
 | 5b | Demo workflow that survives `kill -9` | Done |
 | 6a | API key authentication, heartbeat design | Done |
-| 6b | Free deployment (Oracle Cloud Always Free), final docs | Next |
+| 6b | Free deployment files and guide (Oracle Cloud Always Free) | Done |
 
 ## Contributing and Git workflow
 

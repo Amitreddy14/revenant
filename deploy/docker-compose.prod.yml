@@ -1,0 +1,129 @@
+# Production-style stack for one small VM (ADR-0016): PostgreSQL, Redis, the Revenant server and
+# a Caddy reverse proxy that serves HTTPS. Only Caddy's ports 80 and 443 are published.
+#
+#   cd deploy
+#   cp .env.example .env        # then edit it
+#   docker compose up -d --build
+#   docker compose --profile demo up -d worker     # the demo worker, for the kill -9 demo
+#   docker compose --profile kafka up -d           # optional: also run Kafka
+#
+# Commands are run from this folder, so Compose finds .env next to this file.
+
+name: revenant-prod
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: revenant
+      POSTGRES_USER: revenant
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U revenant -d revenant"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # noeviction: never silently drop keys under memory pressure.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "128mb", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  server:
+    build:
+      context: ..
+      target: server
+    environment:
+      REVENANT_DB_URL: jdbc:postgresql://postgres:5432/revenant
+      REVENANT_DB_USER: revenant
+      REVENANT_DB_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}
+      REVENANT_REDIS_URL: redis://redis:6379
+      REVENANT_KAFKA_ENABLED: ${REVENANT_KAFKA_ENABLED:-false}
+      REVENANT_KAFKA_BOOTSTRAP: kafka:9092
+      # The server refuses to start without a key (ADR-0014).
+      REVENANT_API_KEYS: ${REVENANT_API_KEY:?set REVENANT_API_KEY in deploy/.env}
+      REVENANT_SECURITY_REQUIRED: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8080/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 40s
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    environment:
+      REVENANT_DOMAIN: ${REVENANT_DOMAIN:?set REVENANT_DOMAIN in deploy/.env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # The demo worker. Not started by default: use --profile demo. restart is "no" on purpose, so
+  # a killed worker stays dead until the demo script starts a new one.
+  worker:
+    profiles: ["demo"]
+    build:
+      context: ..
+      target: demo-worker
+    environment:
+      REVENANT_API_KEY: ${REVENANT_API_KEY:?set REVENANT_API_KEY in deploy/.env}
+    volumes:
+      - worker-data:/data
+    depends_on:
+      server:
+        condition: service_healthy
+    restart: "no"
+
+  # Optional. Needs about 1 GB of RAM; leave it off on a small machine (events then wait in the
+  # outbox, ADR-0005, and nothing is lost).
+  kafka:
+    profiles: ["kafka"]
+    image: apache/kafka:4.0.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_NUM_PARTITIONS: 3
+      KAFKA_HEAP_OPTS: -Xms256m -Xmx512m
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  caddy-data:
+  worker-data:
+  kafka-data:
