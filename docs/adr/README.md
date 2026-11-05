@@ -17,3 +17,5 @@ Each ADR captures one significant decision: the context, what was decided, and t
 | [0011](0011-outbox-relay-and-background-scheduler.md) | Outbox relay with an advisory lock, stop-at-first-failure ordering, and a pulling background scheduler | Accepted |
 | [0012](0012-redis-wake-up-hints.md) | Redis pub/sub as an after-commit wake-up hint, with a polling timeout as the guarantee | Accepted |
 | [0013](0013-http-api-and-worker-protocol.md) | HTTP long-polling API; workers replay locally and the lease (task id + attempt) is the only credential | Accepted |
+| [0014](0014-api-key-authentication.md) | Static bearer API keys checked by a servlet filter, constant-time hash comparison, required-in-production switch | Accepted |
+| [0015](0015-worker-heartbeats-proposed.md) | Lease renewal by heartbeat so a short lease and long activities can coexist | Proposed |

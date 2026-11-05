@@ -13,7 +13,7 @@ import java.util.function.Function;
 /** A scripted stand-in for the Revenant server, so the SDK can be tested without a database. */
 final class FakeServer implements AutoCloseable {
 
-    record Request(String method, String path, String query, String body) {}
+    record Request(String method, String path, String query, String body, String authorization) {}
 
     private final HttpServer http;
     private final ConcurrentLinkedQueue<String> workflowTasks = new ConcurrentLinkedQueue<>();
@@ -57,7 +57,8 @@ final class FakeServer implements AutoCloseable {
     private void handle(HttpExchange exchange) throws IOException {
         String body = new String(exchange.getRequestBody().readAllBytes(), StandardCharsets.UTF_8);
         Request request = new Request(exchange.getRequestMethod(), exchange.getRequestURI().getPath(),
-                exchange.getRequestURI().getRawQuery(), body);
+                exchange.getRequestURI().getRawQuery(), body,
+                exchange.getRequestHeaders().getFirst("Authorization"));
         requests.add(request);
         String path = request.path();
         int status;

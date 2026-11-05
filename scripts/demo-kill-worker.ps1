@@ -132,6 +132,10 @@ try {
         Say "A server is already running at $ServerUrl, using it."
     } else {
         $port = ([Uri]$ServerUrl).Port
+        # The demo server runs open; ignore any API key settings left in this PowerShell window.
+        Remove-Item Env:REVENANT_API_KEYS -ErrorAction SilentlyContinue
+        Remove-Item Env:REVENANT_SECURITY_REQUIRED -ErrorAction SilentlyContinue
+        Remove-Item Env:REVENANT_API_KEY -ErrorAction SilentlyContinue
         $serverProcess = Start-Background $java "-jar `"$($jar.FullName)`" --server.port=$port" "server"
         Wait-Until { Test-Health } 120 "the server to report UP (see demo-logs\server.out.log)"
         Say "Server is up (process $($serverProcess.Id))." "Green"

@@ -33,6 +33,32 @@ class RevenantClientTest {
     }
 
     @Test
+    void anApiKeyIsSentAsABearerTokenOnEveryCall() throws Exception {
+        try (FakeServer server = new FakeServer()) {
+            RevenantClient client = new RevenantClient(server.url(), "  secret-key-0123456789  ");
+
+            client.startWorkflow(ID, "Order", "{}");
+            client.getWorkflow(ID);
+            client.poll(TaskKind.ACTIVITY_TASK, "w1", Duration.ofSeconds(30), Duration.ofMillis(100));
+
+            assertThat(server.requests()).hasSize(3);
+            assertThat(server.requests().stream().map(FakeServer.Request::authorization).toList())
+                    .containsOnly("Bearer secret-key-0123456789");
+        }
+    }
+
+    @Test
+    void withoutAnApiKeyNoAuthorizationHeaderIsSent() throws Exception {
+        try (FakeServer server = new FakeServer()) {
+            new RevenantClient(server.url()).startWorkflow(ID, "Order", "{}");
+            new RevenantClient(server.url(), "   ").startWorkflow(ID, "Order", "{}");
+
+            assertThat(server.requests()).hasSize(2);
+            assertThat(server.requests().stream().filter(r -> r.authorization() != null).count()).isZero();
+        }
+    }
+
+    @Test
     void aTaskThatIsNotThereIsAnEmptyPoll() throws Exception {
         try (FakeServer server = new FakeServer()) {
             RevenantClient client = new RevenantClient(server.url());
