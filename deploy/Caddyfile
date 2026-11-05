@@ -1,0 +1,14 @@
+# Caddy fetches and renews a Let's Encrypt certificate for the domain by itself.
+# Only the API and the health probe are reachable from the internet; everything else is a 404.
+{$REVENANT_DOMAIN} {
+	encode zstd gzip
+
+	@public path /api/* /actuator/health
+	handle @public {
+		reverse_proxy server:8080
+	}
+
+	handle {
+		respond "Not found" 404
+	}
+}

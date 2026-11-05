@@ -1,0 +1,9 @@
+.git
+.gradle
+**/build
+.vscode
+.idea
+demo-logs
+deploy/.env
+.env
+*.zip
