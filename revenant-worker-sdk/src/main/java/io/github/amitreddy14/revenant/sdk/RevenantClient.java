@@ -26,11 +26,22 @@ import java.util.Optional;
 public final class RevenantClient {
 
     private final URI base;
+    private final String authorization;
     private final HttpClient http = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
     /** @param baseUrl for example {@code http://localhost:8080} */
     public RevenantClient(String baseUrl) {
+        this(baseUrl, null);
+    }
+
+    /**
+     * @param baseUrl for example {@code https://revenant.example.com}
+     * @param apiKey sent as {@code Authorization: Bearer <apiKey>} on every call (ADR-0014); null or
+     *     blank sends no header, which only works against a server that has authentication off
+     */
+    public RevenantClient(String baseUrl, String apiKey) {
         this.base = URI.create(baseUrl.endsWith("/") ? baseUrl.substring(0, baseUrl.length() - 1) : baseUrl);
+        this.authorization = apiKey == null || apiKey.isBlank() ? null : "Bearer " + apiKey.strip();
     }
 
     /** Starts a workflow with a new random id. */
@@ -122,9 +133,13 @@ public final class RevenantClient {
     }
 
     private HttpRequest.Builder request(String pathAndQuery, Duration timeout) {
-        return HttpRequest.newBuilder(URI.create(base + pathAndQuery))
+        HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(base + pathAndQuery))
                 .timeout(timeout)
                 .header("Content-Type", "application/json; charset=UTF-8");
+        if (authorization != null) {
+            builder.header("Authorization", authorization);
+        }
+        return builder;
     }
 
     private HttpResponse<String> send(HttpRequest request) {

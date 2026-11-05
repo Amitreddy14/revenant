@@ -13,6 +13,8 @@ import java.time.Duration;
  * <pre>
  * java -cp "lib/*" io.github.amitreddy14.revenant.demo.DemoWorker [serverUrl] [ledgerFile]
  * </pre>
+ *
+ * If the server requires an API key, put it in the environment variable {@code REVENANT_API_KEY}.
  */
 public final class DemoWorker {
 
@@ -26,7 +28,7 @@ public final class DemoWorker {
         // 1 second per step: the slow "ship" step lasts about six seconds, long enough to kill.
         OrderActivities activities = new OrderActivities(ledger, 1_000);
 
-        Worker worker = activities.registerOn(Worker.builder(new RevenantClient(serverUrl))
+        Worker worker = activities.registerOn(Worker.builder(new RevenantClient(serverUrl, System.getenv("REVENANT_API_KEY")))
                         .workflow(OrderWorkflow.TYPE, new OrderWorkflow())
                         // Short on purpose: after a crash the server waits this long before it hands
                         // the interrupted step to another worker.

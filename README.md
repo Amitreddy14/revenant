@@ -59,6 +59,20 @@ Without Kafka, start the server with `--revenant.kafka.enabled=false`; the engin
 
 Stop everything with `docker compose down` (add `-v` to also delete the data).
 
+## Securing the API
+
+By default the API is open, which is convenient on your laptop. Before exposing the server, set API keys (each at least 16 characters, comma separated so you can rotate them) and make the server refuse to start without them:
+
+```powershell
+$env:REVENANT_API_KEYS = "paste-a-long-random-key-here"
+$env:REVENANT_SECURITY_REQUIRED = "true"
+.\gradlew.bat :revenant-server:bootRun
+```
+
+Clients and workers then send `Authorization: Bearer <key>`. In Java: `new RevenantClient(url, apiKey)`. A missing or wrong key gets `401`; `/actuator/health` stays open for probes. Use HTTPS in front of the server, since the key travels in a header. Details and limits are in [ADR-0014](docs/adr/0014-api-key-authentication.md).
+
+The demo worker reads its key from the environment variable `REVENANT_API_KEY`. The `kill -9` demo script starts its own server with authentication off.
+
 ## Writing a workflow and a worker
 
 A workflow is ordinary Java. Each `callActivity` is remembered in the history, so after a crash the code runs again from the top and the finished calls return their recorded results instead of running twice.
@@ -140,7 +154,8 @@ revenant/
 | 4b | Redis task wake-ups (accelerator only) | Done |
 | 5a | HTTP API and worker SDK | Done |
 | 5b | Demo workflow that survives `kill -9` | Done |
-| 6 | Free deployment, authentication, documentation | Next |
+| 6a | API key authentication, heartbeat design | Done |
+| 6b | Free deployment (Oracle Cloud Always Free), final docs | Next |
 
 ## Contributing and Git workflow
 

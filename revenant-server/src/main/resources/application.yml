@@ -27,6 +27,12 @@ revenant:
     enabled: true
     url: ${REVENANT_REDIS_URL:redis://localhost:6379}
 
+  security:
+    # API key authentication for /api/* (ADR-0014). Comma-separated keys, each 16+ characters.
+    # Empty = the API is open (local development). Set required: true on any exposed server.
+    api-keys: ${REVENANT_API_KEYS:}
+    required: ${REVENANT_SECURITY_REQUIRED:false}
+
 server:
   port: 8080
   shutdown: graceful
