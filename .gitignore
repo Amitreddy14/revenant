@@ -26,3 +26,6 @@ Thumbs.db
 
 # Logs
 *.log
+
+# Output of scripts/demo-kill-worker.ps1
+demo-logs/

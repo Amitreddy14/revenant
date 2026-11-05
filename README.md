@@ -88,6 +88,29 @@ curl.exe -X POST "http://localhost:8080/api/v1/workflows?type=Order" -H "Content
 curl.exe http://localhost:8080/api/v1/workflows/<workflowId>
 ```
 
+## Demo: `kill -9` a worker mid-flight
+
+The `revenant-demo` module has an order workflow: **charge the card, reserve stock, ship (slow, about 6 seconds), send a receipt**. Every step appends a line to a ledger file, so you can see exactly what really ran.
+
+```powershell
+docker compose up -d
+powershell -ExecutionPolicy Bypass -File .\scripts\demo-kill-worker.ps1
+```
+
+The script starts the server and worker A, starts an order, waits until shipping has begun, then kills worker A with no warning (`Stop-Process -Force`, the Windows twin of `kill -9`). It then starts worker B, which knows nothing about A, and waits for the workflow to finish.
+
+What you should see:
+
+| Step | Times it ran | Why |
+|---|---|---|
+| charge | 1 | finished and recorded before the crash, so it is answered from history on replay |
+| reserve stock | 1 | same |
+| ship (started) | 2 | it was interrupted, so it runs again once the dead worker's 10 s lease expires |
+| ship (done) | 1 | only the second attempt finished |
+| receipt | 1 | runs after shipping completed |
+
+The script ends with `PASS` or `FAIL` for each count. Note the honest guarantee: Revenant gives **at-least-once** execution of an interrupted activity, and **exactly-once recording** of its result. The interrupted step must be safe to repeat, which is why the demo derives its ids from the order id (idempotency). Logs are written to `demo-logs/`. See [docs/demo.md](docs/demo.md) for the timeline.
+
 ## Repository layout
 
 ```
@@ -96,6 +119,8 @@ revenant/
 ├── revenant-persistence/   SQL migrations, JDBC repositories, transactions (no Spring)
 ├── revenant-worker-sdk/    the library workflow authors depend on
 ├── revenant-server/        Spring Boot application
+├── revenant-demo/          order workflow + worker for the kill -9 demo
+├── scripts/                demo-kill-worker.ps1
 ├── docs/
 │   ├── design.md           architecture, failure model, semantics
 │   └── adr/                architecture decision records
@@ -114,8 +139,8 @@ revenant/
 | 4a | Background scheduler and Kafka outbox relay | Done |
 | 4b | Redis task wake-ups (accelerator only) | Done |
 | 5a | HTTP API and worker SDK | Done |
-| 5b | Demo workflow that survives `kill -9` | Next |
-| 6 | Free deployment, documentation, demo | Planned |
+| 5b | Demo workflow that survives `kill -9` | Done |
+| 6 | Free deployment, authentication, documentation | Next |
 
 ## Contributing and Git workflow
 

@@ -19,4 +19,5 @@ include(
     "revenant-persistence",
     "revenant-worker-sdk",
     "revenant-server",
+    "revenant-demo",
 )
