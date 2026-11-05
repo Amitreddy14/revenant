@@ -7,7 +7,7 @@
 ![Spring Boot 4.1](https://img.shields.io/badge/Spring%20Boot-4.1-brightgreen)
 ![License: MIT](https://img.shields.io/badge/License-MIT-yellow)
 
-**Status: Phase 5a (HTTP API and worker SDK).** Activities retry with exponential backoff, workflows can sleep for days with durable timers, and hung activities time out. The server now fires timers by itself and publishes every workflow event to Kafka through a transactional outbox. Redis now carries wake-up hints so workers notice new work quickly, and the engine runs the same without it. Workflows can now be started over HTTP and run by workers written with the Java SDK. The `kill -9` demo comes next (see the [roadmap](#roadmap)).
+**Status: feature-complete (Phases 0 to 6).** Workflows are ordinary Java that survives crashes, deploys and restarts. Activities retry with backoff, workflows sleep with durable timers, hung activities time out, and every workflow event is published to Kafka through a transactional outbox. The API is protected by API keys and the whole stack deploys with Docker Compose. See the [`kill -9` demo](#demo-kill--9-a-worker-mid-flight) for the proof.
 
 ## Why it exists
 
@@ -19,14 +19,35 @@ Revenant records every step of a workflow as an append-only history. After any f
 
 ```mermaid
 flowchart LR
-    Client["Client<br/>(REST API)"] -->|start, signal, query| Server
+    Client["Client<br/>(REST API)"] -->|start, inspect| Server
     Worker["Worker<br/>(your code + SDK)"] -->|poll tasks, report results| Server
     Server["Revenant Server<br/>(Spring Boot, stateless)"] -->|history, tasks, timers, outbox| PG[("PostgreSQL<br/>source of truth")]
-    Server -.->|wake-ups, rate limits| Redis[("Redis<br/>accelerator")]
+    Server -.->|wake-up hints| Redis[("Redis<br/>accelerator")]
     Server -->|outbox relay| Kafka[["Kafka<br/>event stream"]]
 ```
 
-PostgreSQL holds all state that matters. Redis only makes things faster and Kafka only publishes events outward, so losing either never loses a workflow. Details are in [docs/design.md](docs/design.md).
+PostgreSQL holds all state that matters. Redis only makes things faster and Kafka only publishes events outward, so losing either never loses a workflow. Details are in [docs/design.md](docs/design.md); the reasoning behind each choice is in the [architecture decision records](docs/adr/README.md).
+
+## What it guarantees, and what it does not
+
+| Guarantee | How |
+|---|---|
+| A finished step is never run again after a crash | Results are committed to an append-only history; replay answers finished calls from it |
+| A dead worker's task goes to another worker | Leases expire; a fencing number (`attempt`) makes a late result from the old worker useless |
+| Failures are survivable | Retries with exponential backoff, start-to-close timeouts, durable timers that outlive any process |
+| No event is lost on its way to Kafka | Transactional outbox: the event is written in the same database transaction as the change |
+| Losing Redis or Kafka loses nothing | Redis is only a hint with a polling fallback; Kafka is fed from the outbox |
+
+| Not guaranteed | What to do about it |
+|---|---|
+| Exactly-once *execution* of an interrupted activity | It can run twice. Make activities idempotent (the demo derives ids from the order id) |
+| Fast detection of a dead worker | It takes up to one lease (10 s in the demo). Heartbeats are designed in [ADR-0015](docs/adr/0015-worker-heartbeats-proposed.md), not built |
+| High availability | One PostgreSQL, one VM. Workers and server instances are replaceable; the database is not |
+| Fine-grained access control | One level of API key (ADR-0014): no per-client scopes |
+
+## Tech stack
+
+Java 21, Spring Boot 4.1, PostgreSQL 17 (plain JDBC, Flyway), Redis 7 (Lettuce), Kafka 4, Gradle Kotlin DSL multi-module build, Testcontainers, Docker Compose, Caddy, GitHub Actions. The core engine (`revenant-core`) has no framework and no dependencies.
 
 ## Quick start (Windows PowerShell)
 
@@ -127,7 +148,7 @@ The script ends with `PASS` or `FAIL` for each count. Note the honest guarantee:
 
 ## Deploying it for free
 
-`deploy/` holds a production-style stack: PostgreSQL, Redis, the server and a Caddy proxy that serves HTTPS, with API keys required and only ports 80 and 443 open. [docs/deploy.md](docs/deploy.md) walks from creating a free Oracle Cloud account to running the `kill -9` demo on a public server (`scripts/demo-kill-worker.sh`). The container images build in CI; the full deployment is something you prove once on your own VM. Design: [ADR-0016](docs/adr/0016-single-vm-docker-compose-deployment.md).
+`deploy/` holds a production-style stack: PostgreSQL, Redis, the server and a Caddy proxy that serves HTTPS, with API keys required and only ports 80 and 443 open. [docs/deploy.md](docs/deploy.md) walks from creating a free Oracle Cloud account to running the `kill -9` demo on a public server (`scripts/demo-kill-worker.sh`). The container images build in CI. The guide has not yet been run end to end on a real VM, so expect to fix a small thing or two on the first try. Design: [ADR-0016](docs/adr/0016-single-vm-docker-compose-deployment.md).
 
 ## Repository layout
 
@@ -161,7 +182,18 @@ revenant/
 | 5a | HTTP API and worker SDK | Done |
 | 5b | Demo workflow that survives `kill -9` | Done |
 | 6a | API key authentication, heartbeat design | Done |
-| 6b | Free deployment files and guide (Oracle Cloud Always Free) | Done |
+| 6b | Docker deployment files and guide (Oracle Cloud Always Free) | Done |
+
+Not built, by choice: worker heartbeats ([ADR-0015](docs/adr/0015-worker-heartbeats-proposed.md)), signals and queries, per-client access scopes, high availability.
+
+## Documentation
+
+| Read this | For |
+|---|---|
+| [docs/design.md](docs/design.md) | Architecture, data model, failure model, semantics |
+| [docs/adr/](docs/adr/README.md) | 16 architecture decision records |
+| [docs/demo.md](docs/demo.md) | Timeline of the `kill -9` demo |
+| [docs/deploy.md](docs/deploy.md) | From zero to a public server |
 
 ## Contributing and Git workflow
 

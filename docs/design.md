@@ -67,10 +67,10 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    Client["Client<br/>(REST API)"] -->|start, signal, query| Server
+    Client["Client<br/>(REST API)"] -->|start, inspect| Server
     Worker["Worker<br/>(your workflow and activity code + SDK)"] -->|poll tasks, report results| Server
     Server["Revenant Server<br/>(Spring Boot, stateless)"] -->|history, tasks, timers, outbox| PG[("PostgreSQL<br/>source of truth")]
-    Server -.->|wake-ups, rate limits| Redis[("Redis<br/>accelerator")]
+    Server -.->|wake-up hints| Redis[("Redis<br/>accelerator")]
     Server -->|outbox relay| Kafka[["Kafka<br/>workflow event stream"]]
 ```
 
@@ -78,7 +78,7 @@ flowchart LR
 |---|---|---|
 | Revenant Server | API, task dispatch, timer service, outbox relay. Stateless: any instance can serve any request. | No |
 | PostgreSQL | History, task queue, timers, outbox, workflow metadata. | **Yes** (ADR-0003) |
-| Redis | Wake-up notifications so workers do not poll constantly; rate limiting; short-lived caches. | **No** (ADR-0004) |
+| Redis | Wake-up hints so workers do not poll constantly. Nothing else; rate limiting and caches are not built. | **No** (ADR-0004) |
 | Kafka | Outbound stream of workflow events for other systems. | No (ADR-0005) |
 | Worker | Runs user code via the SDK. Stateless between tasks. | No |
 
@@ -297,10 +297,12 @@ Everything the worker holds is disposable: kill it at any point and the lease ru
 | 4b | Redis task wake-ups | Acceleration without a new point of failure. |
 | 5a | HTTP API and worker SDK | Real programs can run workflows against the server. |
 | 5b | Demo workflow that survives `kill -9` | End-to-end crash recovery, demonstrated. |
-| 6 | Free deployment, documentation, demo | A running system others can try. |
+| 6a | API key authentication, heartbeat design | The API is safe to expose. |
+| 6b | Docker deployment files and guide | A running system others can try. |
 
 ## 10. Open questions
 
-- **Free deployment target (Phase 6).** Candidate: an Oracle Cloud Always Free VM running Docker Compose. Fallback: local Docker plus a recorded demo. To be decided in Phase 6.
+- **Free deployment (Phase 6b).** Decided in ADR-0016: Docker Compose on one VM behind Caddy, written for Oracle Cloud Always Free. The files are built and checked in CI; a real deployment still has to be run once by hand.
+- **Worker heartbeats.** Proposed in ADR-0015, not built. Until then a dead worker is noticed only when its lease runs out.
 - **Payload serialization.** JSON through Jackson 3 (bundled with Spring Boot 4) is the default. Revisit if payload size becomes an issue.
 - **History size limit.** Long-lived workflows need a "continue as new" mechanism. Out of scope until later.
