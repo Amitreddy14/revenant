@@ -25,7 +25,7 @@ jobs:
           distribution: temurin
           java-version: 21
 
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
 
       # Commits made from Windows can lose the executable bit on gradlew.
       - name: Make Gradle wrapper executable
