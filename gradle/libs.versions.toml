@@ -2,7 +2,7 @@
 # Spring Boot's BOM manages almost everything else (JUnit, AssertJ, Jackson, Kafka client, ...).
 
 [versions]
-spring-boot = "4.1.2"
+spring-boot = "4.2.0"
 
 [plugins]
 spring-boot = { id = "org.springframework.boot", version.ref = "spring-boot" }
